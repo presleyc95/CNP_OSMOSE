@@ -17,20 +17,24 @@ const GPS_MILES = 3;      // a pole this far from the middle of the circuit is f
 /* ---------- storage ---------- */
 let DBP = null;
 function db(){ if (DBP) return DBP; DBP = new Promise((res,rej)=>{ try{ const r=indexedDB.open('osmrev',1); r.onupgradeneeded=()=>r.result.createObjectStore('files',{keyPath:'id'}); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);}catch(e){rej(e);} }); return DBP; }
-async function dbGet(){ try{ const d=await db(); return await new Promise((res)=>{ const q=d.transaction('files').objectStore('files').get('last'); q.onsuccess=()=>res(q.result||null); q.onerror=()=>res(null); }); }catch(e){ return null; } }
-async function dbPut(rec){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('files','readwrite'); t.objectStore('files').put({id:'last',...rec}); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
+async function dbAll(){ try{ const d=await db(); return await new Promise((res)=>{ const q=d.transaction('files').objectStore('files').getAll(); q.onsuccess=()=>res(q.result||[]); q.onerror=()=>res([]); }); }catch(e){ return []; } }
+async function dbPut(rec){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('files','readwrite'); t.objectStore('files').put(rec); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
+async function dbDel(id){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('files','readwrite'); t.objectStore('files').delete(id); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
 async function dbClear(){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('files','readwrite'); t.objectStore('files').clear(); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
 let REV = {}; try { REV = JSON.parse(localStorage.getItem('osmrev:review')||'{}'); } catch(e){}
 const saveRev = () => { try{ localStorage.setItem('osmrev:review', JSON.stringify(REV)); }catch(e){} };
 const rev = P => REV[P.key] || {};
 
 /* ---------- state ---------- */
+// one dataset per uploaded workbook (circuit); the globals below always point at the selected one
+let SETS = [], DS = null;
 let FILE = '', HEAD = [], HIX = new Map(), POLES = [], WL = [], ISS = [];
 let TAB = 'overview', CUR = null, MAP = null;
 const SORT = {};
-let FIL = {q:'', fin:'', osm:'', sec:'', cond:'', rev:'', iss:''};
+const NOFIL = () => ({q:'', fin:'', osm:'', sec:'', cond:'', rev:'', iss:''});
+let FIL = NOFIL();
 let IFIL = {sev:'', cat:''};
-let DCOLS = 'summary', DQ = '', MAPBY = 'final', MAPBASE = 'streets';
+let DCOLS = 'summary', DQ = '', MAPBY = 'final', MAPBASE = 'streets', MAPSCOPE = 'circuit', MAPFULL = false, MAPVIEW = null, MARKERS = new Map();
 
 /* ---------- recommendations ---------- */
 const BK = ['Replace','Brace','OK','Run SA','N/A','Other',''];
@@ -90,7 +94,12 @@ function readWorkbook(bytes, name){
   const byKey = new Map(); POLES.forEach(P=>{ if (!byKey.has(P.id)) byKey.set(P.id, []); byKey.get(P.id).push(P); });
   WL.forEach(w=>w.rows.forEach(r=>{ r.P = (byKey.get(r.pole)||[])[0]||null; if (r.P) r.P.wl.push({w, r}); }));
   runChecks();
+  const circs = [...new Set(POLES.map(P=>P.circuit).filter(Boolean))].sort(natural);
+  const ds = { id: circs.join(', ') || name.replace(/\.[^.]+$/,''), file: name, head: HEAD, hix: HIX, poles: POLES, wl: WL, iss: ISS };
+  POLES.forEach(P=>P.ds = ds); ISS.forEach(x=>x.ds = ds);
+  return ds;
 }
+function useSet(ds){ DS = ds; FILE = ds.file; HEAD = ds.head; HIX = ds.hix; POLES = ds.poles; WL = ds.wl; ISS = ds.iss; }
 function colIx(...names){ for (const n of names){ const j = HIX.get(norm(n)); if (j!=null) return j; } return -1; }
 
 const FLAGS = [
@@ -133,7 +142,7 @@ const FLAGS = [
 ];
 
 function buildPole(a, i){
-  const v = (...n) => { for (const k of n){ const j = HIX.get(norm(k)); if (j!=null && a[j]!=null) return a[j]; } return null; };
+  const hix = HIX, v = (...n) => { for (const k of n){ const j = hix.get(norm(k)); if (j!=null && a[j]!=null) return a[j]; } return null; };
   const id = String(v('POLE_NO','Pole Number','Pole ID')).trim();
   const P = { i, a, v, id, key: id, wl: [], iss: [] };
   P.osm = v('INSPECTION_ID','INSPECTIONSTATUS','PercntLoad')!=null;
@@ -246,7 +255,9 @@ function renderHead(){
   const ins = POLES.map(P=>P.insp).filter(Boolean).sort((a,b)=>a-b);
   const deliv = [...new Set(POLES.map(P=>P.v('DeliveryDescip')).filter(Boolean))];
   const qc = [...new Set(POLES.map(P=>fmtDate(P.v('QC_COMPLETION_DATE'))).filter(Boolean))];
-  $('#hTitle').innerHTML = `${circ ? `Circuit ${esc(circ)}` : 'Pole inspection'} <span class="who">Osmose pole inspection</span>`;
+  $('#hTitle').innerHTML = `${circ ? `Circuit ${esc(circ)}` : esc(DS.id)} <span class="who">Osmose pole inspection</span>`;
+  const sel = $('#circSel'); sel.hidden = SETS.length<2; $('#rmCirc').hidden = SETS.length<2;
+  sel.innerHTML = SETS.map(s=>`<option value="${esc(s.id)}" ${s===DS?'selected':''}>Circuit ${esc(s.id)} · ${s.poles.length} poles</option>`).join('');
   $('#hSub').innerHTML = [esc(FILE), ins.length && `Inspected ${fmtDate(ins[0])} – ${fmtDate(ins[ins.length-1])}`, qc.length && `QC complete ${qc.join(', ')}`, deliv.length && esc(deliv[0])].filter(Boolean).join(' · ');
 }
 function renderKpis(){
@@ -265,6 +276,22 @@ function renderKpis(){
     k(f0(bad+warn),'Findings', `${bad} errors, ${warn} warnings`, bad?'bad':warn?'warn':'ok', {}, 'findings'),
     k(`${done}/${n}`,'Reviewed', `${pct(done,n)}%`, done===n?'ok':'', {rev:'todo'}),
   ].join('');
+}
+
+function setStats(s){
+  const P = s.poles, c = b => P.filter(x=>x.bFin===b).length;
+  return { n:P.length, osm:P.filter(x=>x.osm).length, rej:P.filter(x=>/reject/i.test(x.status) && !/non\s*reject/i.test(x.status)).length,
+    Replace:c('Replace'), Brace:c('Brace'), OK:c('OK'), 'Run SA':c('Run SA'), other:P.filter(x=>!['Replace','Brace','OK','Run SA'].includes(x.bFin)).length,
+    over:overloaded(P).length, bad:s.iss.filter(x=>x.sev==='bad').length, warn:s.iss.filter(x=>x.sev==='warn').length, done:P.filter(x=>rev(x).ok).length };
+}
+function circuitsCard(){
+  if (SETS.length<2) return '';
+  const tot = {}; const st = SETS.map(s=>{ const t = setStats(s); Object.entries(t).forEach(([k,v])=>tot[k]=(tot[k]||0)+v); return [s,t]; });
+  const cells = t => `<td class="num">${f0(t.n)}</td><td class="num">${f0(t.rej)}</td><td class="num">${f0(t.Replace)}</td><td class="num">${f0(t.Brace)}</td><td class="num">${f0(t.OK)}</td><td class="num">${f0(t['Run SA'])}</td><td class="num">${f0(t.over)}</td><td class="num">${f0(t.bad)}</td><td class="num">${f0(t.warn)}</td><td class="num">${t.done}/${t.n}</td>`;
+  return `<div class="card"><h3>Uploaded circuits <span class="n muted sm">${SETS.length}</span></h3><div class="hint">Click a circuit to switch to it. Everything below is for circuit ${esc(DS.id)}.</div>
+  <div class="tscroll"><table><thead><tr><th>Circuit</th><th>File</th><th class="num">Poles</th><th class="num">Osmose rejects</th><th class="num">Replace</th><th class="num">Brace</th><th class="num">Pole OK</th><th class="num">Run SA</th><th class="num">Over 99% w/o replace</th><th class="num">Errors</th><th class="num">Warnings</th><th class="num">Reviewed</th></tr></thead><tbody>
+  ${st.map(([s,t])=>`<tr class="click ${s===DS?'curset':''}" data-circ="${esc(s.id)}"><td><b>${esc(s.id)}</b>${s===DS?' <span class="pill info">Selected</span>':''}</td><td class="muted">${esc(s.file)}</td>${cells(t)}</tr>`).join('')}
+  <tr class="tot"><td><b>All circuits</b></td><td></td>${cells(tot)}</tr></tbody></table></div></div>`;
 }
 
 /* ---------- tabs ---------- */
@@ -312,7 +339,7 @@ function vOverview(){
   const hcItems = hc.slice(0,10).map(([l,c])=>({label:l, n:c, f:{q:''}})).map(i=>({...i, f:undefined}));
   const tr = count(POLES, P=>P.treat || null).sort((a,b)=>b[1]-a[1]).map(([l,c])=>({label:l, n:c}));
   const yrs = POLES.filter(P=>P.year!=null); const est = yrs.filter(P=>/estim/i.test(P.yearKind)).length;
-  return `<div class="grid2">
+  return `${circuitsCard()}<div class="grid2">
     <div class="card"><h3>CNP final recommendation</h3><div class="hint">Click a bar to list those poles.</div>${barList(finItems,{total:n})}</div>
     <div class="card"><h3>Osmose inspection status</h3><div class="hint">Restorable rejects can be braced; non-restorable rejects need replacing.</div>${barList(stItems,{total:n})}</div>
   </div>
@@ -343,35 +370,67 @@ function mapColour(P){
   return {k:rev(P).ok?'Reviewed':'Not reviewed', c:rev(P).ok?'ok':'none'};
 }
 const MAPLBL = k => MAPBY==='final'||MAPBY==='osmose'||MAPBY==='designer' ? (BKL[k] ?? k) : k;
+const hasGeo = P => P.lat!=null && P.lon!=null;
+const mapAll = () => MAPSCOPE==='all' && SETS.length>1;
+// all circuits: every pole of every circuit (Poles tab filters only apply to the selected circuit view)
+const mapList = () => mapAll() ? SETS.flatMap(s=>s.poles) : filtered();
 function vMap(){
-  const list = filtered(), geo = list.filter(P=>P.lat!=null && P.lon!=null);
+  const all = mapAll(), list = mapList(), geo = list.filter(hasGeo);
   const by = [['final','CNP final'],['osmose','Osmose rec'],['designer','Designer rec'],['status','Inspection status'],['load','% load'],['findings','Findings'],['review','Reviewed']];
-  return `<div class="viewbar"><h2>Map</h2><div class="seg">${by.map(([k,l])=>`<button data-mapby="${k}" aria-pressed="${MAPBY===k}">${l}</button>`).join('')}</div>
+  return `<div class="mapwrap ${MAPFULL?'full':''}" id="mapWrap"><div class="viewbar mapbar"><h2>${MAPFULL?`Circuit ${esc(DS.id)}${all?` + ${SETS.length-1} more`:''}`:'Map'}</h2>
+    ${SETS.length>1?`<div class="seg">${[['circuit',`Circuit ${DS.id}`],['all',`All circuits (${SETS.length})`]].map(([k,l])=>`<button data-mapscope="${k}" aria-pressed="${MAPSCOPE===k}">${esc(l)}</button>`).join('')}</div>`:''}
+    <label class="sm muted">Color by <select class="fin" data-mapbysel="1">${by.map(([k,l])=>`<option value="${k}" ${MAPBY===k?'selected':''}>${l}</option>`).join('')}</select></label>
     <div class="seg">${[['streets','Streets'],['sat','Satellite']].map(([k,l])=>`<button data-mapbase="${k}" aria-pressed="${MAPBASE===k}">${l}</button>`).join('')}</div>
-    <div class="hint">${geo.length} of ${list.length} ${anyFilter()?'filtered ':''}poles have GPS points. ${anyFilter()?'<button class="link" data-clearf="1">Show all poles</button>':'Filters from the Poles tab apply here.'} Click a pole for details.</div></div>
-    <div id="mapLegend" class="legend"></div><div id="map" class="map"></div>`;
+    <input type="search" class="fin" data-mapfind="1" placeholder="Find pole (Enter)" style="width:150px">
+    <button class="btn sm" data-mapfit="1">Fit to poles</button>
+    <button class="btn sm ${MAPFULL?'':'primary'}" data-mapfull="1">${MAPFULL?'Exit full screen (Esc)':'Full screen'}</button>
+    <div class="hint">${all ? `${geo.length} poles with GPS across ${SETS.length} circuits. Circuit ${esc(DS.id)} is drawn larger; other circuits are smaller and lighter. Poles tab filters don't apply here.`
+      : `${geo.length} of ${list.length} ${anyFilter()?'filtered ':''}poles have GPS points. ${anyFilter()?'<button class="link" data-clearf="1">Show all poles</button>':'Filters from the Poles tab apply here.'}`} Click a pole for details.</div></div>
+    <div id="mapLegend" class="legend"></div><div id="map" class="map"></div></div>`;
+}
+function popupHtml(P){
+  const other = P.ds!==DS;
+  return `<div class="pop"><b>Pole ${esc(P.id)}</b>${SETS.length>1?` <span class="muted">· Circuit ${esc(P.ds.id)}</span>`:''}<div>${esc(P.hc||'')} · Section ${esc(P.sec)} · ${P.load!=null?`${P.load}% load`:'no load calc'}</div>
+    <div style="margin:6px 0">Osmose: ${recPill(P.bOs,P.recOs||'—')} → Designer: ${recPill(P.bDes,P.designer||'—')} → CNP: ${recPill(P.bFin,P.final||'—')}</div>
+    ${P.iss.filter(x=>x.sev!=='info').slice(0,3).map(x=>`<div class="iss ${x.sev}" style="padding:3px 8px;margin-top:3px;font-size:12px">${esc(x.title)}</div>`).join('')}
+    <button class="btn sm" data-open="${P.i}" data-ds="${esc(P.ds.id)}" style="margin-top:8px">${other?`Open pole (switches to circuit ${esc(P.ds.id)})`:'Open pole'}</button></div>`;
 }
 function initMap(){
   if (!window.L){ $('#map').innerHTML = '<p class="muted" style="padding:16px">The map library could not be loaded.</p>'; return; }
-  const geo = filtered().filter(P=>P.lat!=null && P.lon!=null);
+  const all = mapAll(), geo = mapList().filter(hasGeo);
   MAP = L.map('map', {preferCanvas:true});
   const base = MAPBASE==='sat'
     ? L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:20, maxNativeZoom:19, attribution:'Imagery &copy; Esri'})
     : L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:20, maxNativeZoom:19, attribution:'&copy; OpenStreetMap contributors'});
   base.addTo(MAP);
-  const seen = new Map();
-  geo.forEach(P=>{ const {k,c} = mapColour(P); seen.set(k, c);
-    const m = L.circleMarker([P.lat,P.lon], {radius:7, weight:2, color: MAPBASE==='sat' ? '#fff' : cssVar('--surface'), fillColor: cssVar(BKV[c]), fillOpacity:1}).addTo(MAP);
-    m.bindTooltip(`${P.id} · ${MAPLBL(k)}`);
-    m.bindPopup(()=>`<div class="pop"><b>Pole ${esc(P.id)}</b><div>${esc(P.hc||'')} · Section ${esc(P.sec)} · ${P.load!=null?`${P.load}% load`:'no load calc'}</div>
-      <div style="margin:6px 0">Osmose: ${recPill(P.bOs,P.recOs||'—')} → Designer: ${recPill(P.bDes,P.designer||'—')} → CNP: ${recPill(P.bFin,P.final||'—')}</div>
-      ${P.iss.filter(x=>x.sev!=='info').slice(0,3).map(x=>`<div class="iss ${x.sev}" style="padding:3px 8px;margin-top:3px;font-size:12px">${esc(x.title)}</div>`).join('')}
-      <button class="btn sm" data-open="${P.i}" style="margin-top:8px">Open pole</button></div>`);
+  const seen = new Map(), ring = MAPBASE==='sat' ? '#fff' : cssVar('--surface');
+  MARKERS = new Map();
+  // other circuits first so the selected circuit draws on top
+  [...geo].sort((a,b)=>(a.ds===DS)-(b.ds===DS)).forEach(P=>{ const {k,c} = mapColour(P); seen.set(k, c); const mine = P.ds===DS;
+    const m = L.circleMarker([P.lat,P.lon], {radius: mine?7:5, weight: mine?2:1, color: ring, fillColor: cssVar(BKV[c]), fillOpacity: mine||!all ? 1 : 0.55}).addTo(MAP);
+    m.bindTooltip(`${all?`${P.ds.id} · `:''}${P.id} · ${MAPLBL(k)}`);
+    m.bindPopup(()=>popupHtml(P));
+    MARKERS.set(`${P.ds.id}|${P.id}${P.dup&&!P.dup.same?`@${P.row}`:''}`, {m, P});
   });
+  if (all) SETS.forEach(s=>{ const g = s.poles.filter(hasGeo); if (!g.length) return;
+    const med = a => { const x=[...a].sort((p,q)=>p-q); return x[Math.floor(x.length/2)]; };
+    L.tooltip({permanent:true, direction:'center', className:`circlbl ${s===DS?'cur':''}`, interactive:false}).setLatLng([med(g.map(P=>P.lat)), med(g.map(P=>P.lon))]).setContent(`Circuit ${esc(s.id)}`).addTo(MAP); });
   $('#mapLegend').innerHTML = [...seen.entries()].sort((a,b)=>natural(a[0],b[0])).map(([k,c])=>`<span><i class="sw ${c}" style="border-radius:50%;width:10px;height:10px"></i>${esc(MAPLBL(k))} (${geo.filter(P=>mapColour(P).k===k).length})</span>`).join('');
-  if (geo.length) MAP.fitBounds(L.latLngBounds(geo.map(P=>[P.lat,P.lon])).pad(0.05)); else MAP.setView([29.95,-95.3], 11);
+  // keep the view when only the colors or base layer change
+  const key = all ? 'all' : `c:${DS.id}:${JSON.stringify(FIL)}`;
+  if (MAPVIEW && MAPVIEW.key===key) MAP.setView(MAPVIEW.c, MAPVIEW.z);
+  else if (geo.length) MAP.fitBounds(L.latLngBounds(geo.map(P=>[P.lat,P.lon])).pad(0.05)); else MAP.setView([29.95,-95.3], 11);
+  MAP.on('moveend', ()=>{ if (MAP) MAPVIEW = {key, c:MAP.getCenter(), z:MAP.getZoom()}; });
   setTimeout(()=>MAP && MAP.invalidateSize(), 50);
 }
+function mapFind(q){
+  q = String(q||'').trim().toLowerCase(); if (!q || !MAP) return;
+  const hits = [...MARKERS.values()].filter(x=>x.P.id.toLowerCase()===q).concat([...MARKERS.values()].filter(x=>x.P.id.toLowerCase().startsWith(q) && x.P.id.toLowerCase()!==q));
+  const h = hits.find(x=>x.P.ds===DS) || hits[0];
+  if (!h){ toast(`No pole ${q} on this map${mapAll()?'':' (try All circuits)'}`); return; }
+  MAP.setView(h.m.getLatLng(), Math.max(MAP.getZoom(), 18)); h.m.openPopup();
+}
+function setMapFull(on){ MAPFULL = on; document.body.classList.toggle('mapfull-on', on); render(); }
 
 /* ---------- poles ---------- */
 function filterBar(){
@@ -505,7 +564,7 @@ function vLists(){
 
 /* ---------- poles over 99% load that Osmose didn't recommend replacing ---------- */
 const OVER = 99;
-const overloaded = () => POLES.filter(P=>P.load!=null && P.load>OVER && P.bOs!=='Replace').sort((a,b)=>b.load-a.load || byPole(a,b));
+const overloaded = (poles=POLES) => poles.filter(P=>P.load!=null && P.load>OVER && P.bOs!=='Replace').sort((a,b)=>b.load-a.load || byPole(a,b));
 const overCols = [['Pole',P=>`<b>${esc(P.id)}</b>`+(P.dup&&!P.dup.same?` <span class="muted">(row ${P.row})</span>`:'')],['Section',P=>esc(P.sec)],['% load',P=>`<span class="pct bad">${P.load}%</span>`],['Status',P=>esc(P.status)],['Load calc',P=>esc(P.loadStatus)],
   ['H / C',P=>esc(P.hc)],['Year',P=>P.year!=null?`${P.year}${/estim/i.test(P.yearKind)?' (est.)':''}`:''],['Osmose rec',P=>recPill(P.bOs,P.recOs||'—')],['Truss size',P=>esc(P.truss)],['Designer',P=>P.designer?recPill(P.bDes,P.designer):''],['CNP final',P=>recPill(P.bFin,P.final||'—')]];
 function vOver(){
@@ -560,50 +619,132 @@ function vData(){
 }
 
 /* ---------- Excel download ---------- */
-function exportExcel(){
-  const wb = XLSX.utils.book_new();
-  const summary = POLES.map(P=>({ 'Pole': P.id, 'Circuit': P.circuit, 'Section': P.sec, 'Osmose status': P.status, 'Load calc status': P.loadStatus, '% load': P.load, 'Remaining strength': P.rs,
+const XLDEF = {scope:'current', summary:true, poles:true, over:true, findings:true, notes:false, recs:false, lists:false, data:false};
+let XLOPT = {...XLDEF}; try { Object.assign(XLOPT, JSON.parse(localStorage.getItem('osmrev:xl')||'{}')); } catch(e){}
+const XLSHEETS = [
+  ['summary','Circuit summary','Counts by CNP final, Osmose rejects, over-99% poles, findings and review progress for each circuit.'],
+  ['poles','Pole review','One row per pole: recommendations, load, height/class, conditions, finding counts and your review marks and notes.'],
+  ['over','Over 99% load','Poles over 99% load that Osmose did not recommend replacing.'],
+  ['findings','Findings','Errors and warnings from the checks.'],
+  ['recs','Recommendation changes','Poles where the CNP final is lighter or heavier than the Osmose recommendation.'],
+  ['lists','Osmose work lists','Resiliency Replaces, Braces and additional issue sheets, with each pole\'s CNP final.'],
+  ['data','Full Osmose data','Every column of the pole data sheet, with the spreadsheet row.'],
+];
+function openExport(){
+  const f = $('#xlForm'), all = XLOPT.scope==='all' && SETS.length>1;
+  const ck = ([k,t,d]) => `<label class="opt"><input type="checkbox" name="${k}" ${XLOPT[k]?'checked':''}><span><b>${t}</b><small>${d}</small></span></label>${k==='findings'?`<label class="opt sub"><input type="checkbox" name="notes" ${XLOPT.notes?'checked':''}><span>Include notes (informational findings)</span></label>`:''}`;
+  f.innerHTML = `<h2>Download review (Excel)</h2>
+    ${SETS.length>1?`<fieldset><legend>Circuits</legend>
+      <label class="opt"><input type="radio" name="scope" value="current" ${!all?'checked':''}><span><b>Circuit ${esc(DS.id)}</b><small>${DS.poles.length} poles, the circuit you're viewing</small></span></label>
+      <label class="opt"><input type="radio" name="scope" value="all" ${all?'checked':''}><span><b>All uploaded circuits</b><small>${SETS.map(s=>esc(s.id)).join(', ')} (${SETS.reduce((n,s)=>n+s.poles.length,0)} poles), combined with a Circuit column</small></span></label></fieldset>`:''}
+    <fieldset><legend>Sheets to include</legend>${XLSHEETS.map(ck).join('')}</fieldset>
+    <div class="dlgbtns"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok" id="xlGo">Download</button></div>`;
+  const sync = () => { const any = XLSHEETS.some(([k])=>f.elements[k].checked); $('#xlGo').disabled = !any; f.elements.notes.disabled = !f.elements.findings.checked; };
+  f.onchange = sync; sync();
+  $('#xlDlg').showModal();
+}
+// run on submit (not the dialog's close event, which some browsers delay while the window is in the background)
+$('#xlForm').addEventListener('submit', e=>{
+  if (e.submitter?.value!=='ok') return;
+  const f = $('#xlForm'); XLSHEETS.forEach(([k])=>XLOPT[k] = f.elements[k].checked); XLOPT.notes = f.elements.notes.checked;
+  if (f.elements.scope) XLOPT.scope = [...f.querySelectorAll('[name=scope]')].find(r=>r.checked)?.value || 'current';
+  try{ localStorage.setItem('osmrev:xl', JSON.stringify(XLOPT)); }catch(e){}
+  exportExcel(XLOPT);
+});
+function exportExcel(o){
+  const sets = o.scope==='all' && SETS.length>1 ? SETS : [DS], poles = sets.flatMap(s=>s.poles);
+  const wb = XLSX.utils.book_new(), used = new Set();
+  const add = (rows, name) => {
+    if (!rows.length) rows = [{'': 'Nothing to list'}];
+    const ws = XLSX.utils.json_to_sheet(rows, {cellDates:true});
+    ws['!cols'] = Object.keys(rows[0]).map(k=>({wch: /notes|conditions|remarks|finding|detail|description/i.test(k) ? 44 : Math.max(9, Math.min(28, k.length+2))}));
+    ws['!autofilter'] = {ref: ws['!ref']};
+    let n = name.replace(/[\\\/?*\[\]:]/g,'').slice(0,31), b = n, j = 2; while (used.has(n.toLowerCase())) n = `${b.slice(0,27)} (${j++})`; used.add(n.toLowerCase());
+    XLSX.utils.book_append_sheet(wb, ws, n);
+  };
+  const base = P => ({ 'Circuit': P.ds.id, 'Pole': P.id, 'Sheet row': P.row, 'Section': P.sec });
+  const lbl = {bad:'Error', warn:'Warning', info:'Note'};
+  if (o.summary) add(sets.map(s=>{ const t = setStats(s); return { 'Circuit': s.id, 'File': s.file, 'Poles': t.n, 'With Osmose data': t.osm, 'Osmose rejects': t.rej, 'CNP final: Replace': t.Replace, 'CNP final: Brace': t.Brace, 'CNP final: Pole OK': t.OK, 'CNP final: Run SA': t['Run SA'], 'CNP final: other / not set': t.other, 'Over 99% load w/o Osmose replace': t.over, 'Errors': t.bad, 'Warnings': t.warn, 'Reviewed': t.done }; }), 'Summary');
+  if (o.poles) add(poles.map(P=>({ ...base(P), 'Osmose status': P.status, 'Load calc status': P.loadStatus, '% load': P.load, 'Remaining strength': P.rs,
     'H/C (Osmose field)': P.hcField, 'H/C (designer)': P.hcDesigner, 'Year made': P.year, 'Age': P.age, 'Treatment': P.treat, 'Latitude': P.lat, 'Longitude': P.lon,
     'Osmose rec': P.recOs, 'Recommended truss': P.recRec, 'Truss size': P.truss, 'Designer rec': P.designer, 'CNP initial': P.cnpInit, 'CNP initial type': P.cnpInitType, 'CNP final': P.final,
     'Conditions': P.flags.map(f=>f.l).join('; '), 'Remarks': P.remarks.join('; '), 'Errors': P.iss.filter(x=>x.sev==='bad').length, 'Warnings': P.iss.filter(x=>x.sev==='warn').length,
-    'Notes': P.notes, 'CNP notes': P.cnpNotes, 'Reviewed': rev(P).ok ? 'Yes' : '', 'Review note': rev(P).note || '' }));
-  const ws1 = XLSX.utils.json_to_sheet(summary); ws1['!cols'] = Object.keys(summary[0]||{}).map(k=>({wch: /notes|conditions|remarks/i.test(k) ? 40 : Math.max(10, k.length+2)})); ws1['!autofilter'] = {ref: ws1['!ref']};
-  XLSX.utils.book_append_sheet(wb, ws1, 'Pole review');
-  const lbl = {bad:'Error', warn:'Warning', info:'Note'};
-  const fr = ISS.map(x=>({ Severity: lbl[x.sev], Category: x.cat, Pole: x.P?.id ?? '', Section: x.P?.sec ?? '', Finding: x.title, Detail: x.detail, 'CNP final': x.P?.final ?? '' }));
-  const ws2 = XLSX.utils.json_to_sheet(fr.length?fr:[{Severity:'',Category:'',Pole:'',Section:'',Finding:'No findings',Detail:'','CNP final':''}]); ws2['!cols'] = [{wch:10},{wch:16},{wch:12},{wch:10},{wch:60},{wch:50},{wch:14}]; ws2['!autofilter'] = {ref: ws2['!ref']};
-  XLSX.utils.book_append_sheet(wb, ws2, 'Findings');
-  const circ = [...new Set(POLES.map(P=>P.circuit).filter(Boolean))].join('_') || 'Poles';
-  XLSX.writeFile(wb, `${circ}_Osmose_Pole_Review.xlsx`);
+    'Notes': P.notes, 'CNP notes': P.cnpNotes, 'Reviewed': rev(P).ok ? 'Yes' : '', 'Review note': rev(P).note || '' })), 'Pole review');
+  if (o.over) add(sets.flatMap(s=>overloaded(s.poles)).map(P=>({ ...base(P), '% load': P.load, 'Osmose status': P.status, 'Load calc status': P.loadStatus, 'Remaining strength': P.rs,
+    'H/C (Osmose field)': P.hcField, 'H/C (designer)': P.hcDesigner, 'Year made': P.year, 'Osmose rec': P.recOs, 'Recommended truss': P.recRec, 'Truss size': P.truss,
+    'Designer rec': P.designer, 'CNP initial': P.cnpInit, 'CNP final': P.final, 'Conditions': P.flags.map(f=>f.l).join('; '), 'Notes': P.notes, 'CNP notes': P.cnpNotes,
+    'Reviewed': rev(P).ok ? 'Yes' : '', 'Review note': rev(P).note || '', 'Latitude': P.lat, 'Longitude': P.lon })), 'Over 99% load');
+  if (o.findings){ const ord = {bad:0, warn:1, info:2};
+    add(sets.flatMap(s=>s.iss).filter(x=>o.notes || x.sev!=='info').sort((a,b)=>natural(a.ds.id,b.ds.id) || ord[a.sev]-ord[b.sev] || natural(a.cat,b.cat) || natural(a.P?.id,b.P?.id))
+      .map(x=>({ 'Circuit': x.ds.id, 'Severity': lbl[x.sev], 'Category': x.cat, 'Pole': x.P?.id ?? '', 'Sheet row': x.P?.row ?? '', 'Section': x.P?.sec ?? '', 'Finding': x.title, 'Detail': x.detail, 'CNP final': x.P?.final ?? '' })), 'Findings'); }
+  if (o.recs) add(poles.filter(P=>P.bOs in RANK && P.bFin in RANK && P.bOs!==P.bFin).map(P=>({ ...base(P), 'Osmose status': P.status, '% load': P.load,
+    'Osmose rec': P.recOs, 'Recommended truss': P.recRec, 'Designer rec': P.designer, 'CNP final': P.final, 'Change': RANK[P.bFin]<RANK[P.bOs] ? 'Lighter than Osmose' : 'Heavier than Osmose', 'Notes': P.notes, 'CNP notes': P.cnpNotes })), 'Rec changes');
+  if (o.lists){ const by = new Map();
+    sets.forEach(s=>s.wl.forEach(w=>{ if (!by.has(w.name)) by.set(w.name, []);
+      w.rows.forEach(r=>{ const row = {'Circuit': s.id}; w.head.forEach((h,i)=>{ if (h) row[h] = r.cells[i] ?? ''; }); row['CNP final'] = r.P ? (r.P.final || '') : 'Not in pole data'; by.get(w.name).push(row); }); }));
+    by.forEach((rows, n)=>add(rows, n)); }
+  if (o.data){ const cols = []; sets.forEach(s=>s.head.forEach(h=>{ if (h && !cols.includes(h)) cols.push(h); }));
+    add(sets.flatMap(s=>s.poles.map(P=>{ const r = {'Circuit': s.id, 'Sheet row': P.row}; cols.forEach(h=>{ const i = s.head.indexOf(h); r[h] = i>=0 && P.a[i]!=null ? P.a[i] : ''; }); return r; })), 'Osmose data'); }
+  if (!wb.SheetNames.length){ toast('Pick at least one sheet'); return; }
+  const nm = sets.length===1 ? sets[0].id : sets.length<=3 ? sets.map(s=>s.id).join('_') : `${sets.length}_circuits`;
+  XLSX.writeFile(wb, `${nm.replace(/[^\w-]+/g,'_')}_Osmose_Pole_Review.xlsx`);
+  toast(`Downloaded ${wb.SheetNames.length} sheet${wb.SheetNames.length===1?'':'s'}`);
 }
 
 /* ---------- copy ---------- */
 function copyTable(tbl){ if (!tbl) return; const t = [...tbl.rows].map(r=>[...r.cells].map(c=>c.innerText.replace(/[▲▼]/g,'').replace(/\s+/g,' ').trim()).join('\t')).join('\n'); navigator.clipboard.writeText(t).then(()=>toast('Table copied'), ()=>toast('Copy failed')); }
 
-/* ---------- loading ---------- */
-async function loadFile(f){
-  const li = document.createElement('li'); li.innerHTML = `<span>${esc(f.name)}</span><span class="st">Reading…</span>`; $('#fileList').replaceChildren(li);
-  try {
-    if (!window.XLSX) throw new Error('The Excel reader could not be loaded. Check your internet connection.');
-    const bytes = await f.arrayBuffer();
-    readWorkbook(bytes, f.name);
-    if (!POLES.length) throw new Error('No pole rows were found.');
-    dbPut({name:f.name, bytes, at:Date.now()});
-    start();
-  } catch(e){ console.error(e); li.querySelector('.st').className='e'; li.querySelector('.e').textContent = e.message || 'Could not read this file'; }
+/* ---------- loading: several workbooks, one per circuit ---------- */
+const isSheet = f => /\.(xlsx|xlsm|xls|csv)$/i.test(f.name);
+async function loadFiles(files, select){
+  files = files.filter(isSheet); if (!files.length) return;
+  const first = !SETS.length, prev = DS, ul = $('#fileList'); if (first) ul.innerHTML = '';
+  let last = null;
+  for (const f of files){
+    const li = document.createElement('li'); li.innerHTML = `<span>${esc(f.name)}</span><span class="st">Reading…</span>`; if (first) ul.appendChild(li);
+    const st = (cls, t) => { const x = li.querySelector('span:last-child'); x.className = cls; x.textContent = t; };
+    try {
+      if (!window.XLSX) throw new Error('The Excel reader could not be loaded. Check your internet connection.');
+      const bytes = f.saved || await f.arrayBuffer();   // not f.bytes: File has a built-in bytes() method
+      const ds = readWorkbook(bytes, f.name);
+      if (!ds.poles.length) throw new Error('No pole rows were found.');
+      const old = SETS.findIndex(s=>s.id===ds.id);
+      if (old>=0) SETS[old] = ds; else SETS.push(ds);
+      SETS.sort((a,b)=>natural(a.id,b.id));
+      if (f.recId!==ds.id){ if (f.recId) dbDel(f.recId); dbPut({id:ds.id, name:f.name, bytes, at:Date.now()}); }
+      st('g', `Circuit ${ds.id} · ${ds.poles.length} poles${old>=0?' (replaced the earlier upload)':''}`);
+      if (!first && !f.recId) toast(`Circuit ${ds.id} ${old>=0?'replaced':'added'}: ${ds.poles.length} poles`);
+      last = last || ds;   // open the first workbook that loaded
+    } catch(e){ console.error(e); st('e', e.message || 'Could not read this file'); if (!first) toast(`${f.name}: ${e.message || 'could not read this file'}`); }
+  }
+  if (!last){ if (prev) useSet(prev); return; }
+  start(SETS.find(s=>s.id===select) || last, !first);
 }
-function start(){ TAB = 'overview'; CUR = null; FIL = {q:'', fin:'', osm:'', sec:'', cond:'', rev:'', iss:''}; $('#empty').hidden = true; $('#app').hidden = false; $('#clearAll').hidden = false; $('#openOther').hidden = false; renderHead(); renderKpis(); render(); }
+function start(ds, keepTab){
+  useSet(ds); if (!keepTab) TAB = 'overview';
+  CUR = null; FIL = NOFIL(); IFIL = {sev:'', cat:''}; MAPVIEW = null;
+  try{ localStorage.setItem('osmrev:cur', ds.id); }catch(e){}
+  $('#empty').hidden = true; $('#app').hidden = false; $('#clearAll').hidden = false; $('#openOther').hidden = false;
+  renderHead(); renderKpis(); render();
+}
+function switchSet(id){ const s = SETS.find(x=>x.id===id); if (s && s!==DS) start(s, true); }
+async function clearAll(){ await dbClear(); SETS=[]; DS=null; POLES=[]; WL=[]; ISS=[]; if (MAPFULL) setMapFull(false); $('#app').hidden=true; $('#empty').hidden=false; $('#clearAll').hidden=true; $('#openOther').hidden=true; $('#restore').hidden=true; $('#fileList').innerHTML=''; }
 $('#pick').onclick = () => $('#file').click();
 $('#openOther').onclick = () => $('#file').click();
-$('#file').onchange = e => { const f = e.target.files[0]; e.target.value=''; if (f){ $('#app').hidden=true; $('#empty').hidden=false; loadFile(f); } };
-$('#clearAll').onclick = async () => { await dbClear(); POLES=[]; WL=[]; ISS=[]; $('#app').hidden=true; $('#empty').hidden=false; $('#clearAll').hidden=true; $('#openOther').hidden=true; $('#restore').hidden=true; $('#fileList').innerHTML=''; };
-$('#restore').onclick = async () => { const r = await dbGet(); if (r) loadFile(new File([r.bytes], r.name)); };
-dbGet().then(r=>{ if (r){ $('#restore').hidden=false; $('#restore').textContent = `Reopen ${r.name.length>40?r.name.slice(0,38)+'…':r.name}`; } });
+$('#file').onchange = e => { const fs = [...e.target.files]; e.target.value=''; loadFiles(fs); };
+$('#clearAll').onclick = () => { if (confirm(SETS.length>1 ? `Remove all ${SETS.length} circuits from this browser?` : 'Remove this circuit from this browser?')) clearAll(); };
+$('#circSel').onchange = e => switchSet(e.target.value);
+$('#rmCirc').onclick = () => { if (!DS || !confirm(`Remove circuit ${DS.id} from this browser? Your review marks stay saved.`)) return;
+  const id = DS.id; dbDel(id); SETS = SETS.filter(s=>s.id!==id); if (!SETS.length){ clearAll(); return; } start(SETS[0], true); toast(`Circuit ${id} removed`); };
+$('#restore').onclick = async () => { const recs = await dbAll(); let cur = null; try{ cur = localStorage.getItem('osmrev:cur'); }catch(e){}
+  loadFiles(recs.map(r=>({name:r.name, saved:r.bytes, recId:r.id})), cur); };
+dbAll().then(recs=>{ if (!recs.length) return; $('#restore').hidden=false;
+  $('#restore').textContent = recs.length===1 ? `Reopen ${recs[0].name.length>40?recs[0].name.slice(0,38)+'…':recs[0].name}` : `Reopen ${recs.length} saved circuits`; });
 const drop = $('#drop');
 ['dragenter','dragover'].forEach(ev=>document.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave','drop'].forEach(ev=>document.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.remove('over'); }));
-document.addEventListener('drop', e=>{ const f = [...(e.dataTransfer?.files||[])].find(f=>/\.(xlsx|xlsm|xls|csv)$/i.test(f.name)); if (f){ $('#app').hidden=true; $('#empty').hidden=false; loadFile(f); } else if (e.dataTransfer?.files?.length) toast('Drop an Excel workbook (.xlsx)'); });
-$('#xlsxBtn').onclick = () => exportExcel();
+document.addEventListener('drop', e=>{ const fs = [...(e.dataTransfer?.files||[])].filter(isSheet); if (fs.length) loadFiles(fs); else if (e.dataTransfer?.files?.length) toast('Drop an Excel workbook (.xlsx)'); });
+$('#xlsxBtn').onclick = () => openExport();
 $('#themeBtn').onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'); const n = cur==='dark'?'light':'dark'; document.documentElement.dataset.theme = n; try{ localStorage.setItem('osmrev:theme', n); }catch(e){} if (TAB==='map' && POLES.length) render(); };
 try{ const t = localStorage.getItem('osmrev:theme'); if (t) document.documentElement.dataset.theme = t; }catch(e){}
 
@@ -624,14 +765,21 @@ function revealCard(card){ const list = $('#plist'); if (!list || !card) return;
   const L = list.getBoundingClientRect(), C = card.getBoundingClientRect();
   if (getComputedStyle(list).flexDirection==='row'){ if (C.left < L.left) list.scrollLeft -= L.left - C.left + 8; else if (C.right > L.right) list.scrollLeft += C.right - L.right + 8; return; }
   if (C.top < L.top) list.scrollTop -= L.top - C.top + 4; else if (C.bottom > L.bottom) list.scrollTop += C.bottom - L.bottom + 4; }
-function openPole(i){ CUR = +i; if (!filtered().some(P=>P.i===CUR)) FIL = {q:'', fin:'', osm:'', sec:'', cond:'', rev:'', iss:''}; TAB = 'poles'; render(); revealCard(document.querySelector('.pcard[aria-current="true"]')); window.scrollTo({top: $('#kpis').offsetTop-70}); }
+function openPole(i){ CUR = +i; if (!filtered().some(P=>P.i===CUR)) FIL = NOFIL(); TAB = 'poles'; render(); revealCard(document.querySelector('.pcard[aria-current="true"]')); window.scrollTo({top: $('#kpis').offsetTop-70}); }
 document.addEventListener('click', e=>{
   const t = e.target.closest('button,[data-open],[data-kf],th[data-sort],[data-copytext],td[data-kf],i[data-kf]'); if (!t) return;
   if (t.dataset.tab){ TAB = t.dataset.tab; render(); return; }
   if (t.dataset.kf){ setFilter(JSON.parse(t.dataset.kf), t.dataset.kt); return; }
-  if (t.dataset.open!=null && t.dataset.open!==''){ if (MAP) MAP.closePopup(); openPole(t.dataset.open); return; }
+  if (t.dataset.open!=null && t.dataset.open!==''){ if (MAP) MAP.closePopup();
+    if (t.dataset.ds && t.dataset.ds!==DS.id){ const s = SETS.find(x=>x.id===t.dataset.ds); if (s){ useSet(s); FIL = NOFIL(); IFIL = {sev:'', cat:''}; try{ localStorage.setItem('osmrev:cur', s.id); }catch(e){} renderHead(); renderKpis(); } }
+    if (MAPFULL){ MAPFULL = false; document.body.classList.remove('mapfull-on'); }
+    openPole(t.dataset.open); return; }
+  if (t.dataset.circ){ switchSet(t.dataset.circ); return; }
+  if (t.dataset.mapscope){ MAPSCOPE = t.dataset.mapscope; render(); return; }
+  if (t.dataset.mapfull){ setMapFull(!MAPFULL); return; }
+  if (t.dataset.mapfit){ MAPVIEW = null; render(); return; }
   if (t.dataset.pole!=null && t.dataset.pole!==''){ selectPole(+t.dataset.pole, !t.closest('#plist')); return; }
-  if (t.dataset.clearf){ FIL = {q:'', fin:'', osm:'', sec:'', cond:'', rev:'', iss:''}; render(); return; }
+  if (t.dataset.clearf){ FIL = NOFIL(); render(); return; }
   if (t.dataset.mapby){ MAPBY = t.dataset.mapby; render(); return; }
   if (t.dataset.mapbase){ MAPBASE = t.dataset.mapbase; render(); return; }
   if (t.dataset.isev!=null){ IFIL.sev = t.dataset.isev; render(); return; }
@@ -644,6 +792,7 @@ document.addEventListener('click', e=>{
 document.addEventListener('change', e=>{
   const t = e.target;
   if (t.dataset.f && t.dataset.f!=='q'){ FIL[t.dataset.f] = t.value; render(); return; }
+  if (t.dataset.mapbysel){ MAPBY = t.value; render(); return; }
   if (t.dataset.icat){ IFIL.cat = t.value; render(); return; }
   if (t.dataset.rev!=null){ const P = POLES[+t.dataset.rev]; REV[P.key] = {...rev(P), ok: t.checked}; saveRev(); renderKpis(); const y = window.scrollY; render(); window.scrollTo(0,y); toast(t.checked ? `Pole ${P.id} marked reviewed` : `Pole ${P.id} unmarked`); return; }
   if (t.dataset.revnote!=null){ const P = POLES[+t.dataset.revnote]; REV[P.key] = {...rev(P), note: t.value.trim()}; saveRev(); toast('Note saved'); }
@@ -653,6 +802,8 @@ let qT; document.addEventListener('input', e=>{
   if (t.dataset.f==='q' || t.dataset.dq){ clearTimeout(qT); qT = setTimeout(()=>{ if (t.dataset.dq) DQ = t.value; else FIL.q = t.value; const pos = t.selectionStart; render(); const n = document.querySelector(t.dataset.dq?'[data-dq]':'[data-f="q"]'); if (n){ n.focus(); try{ n.setSelectionRange(pos,pos); }catch(err){} } }, 200); }
 });
 document.addEventListener('keydown', e=>{
+  if (e.key==='Enter' && e.target.dataset?.mapfind){ e.preventDefault(); mapFind(e.target.value); return; }
+  if (e.key==='Escape' && MAPFULL && !$('#xlDlg').open){ setMapFull(false); return; }
   if (TAB!=='poles' || /input|select|textarea/i.test(document.activeElement?.tagName||'')) return;
   if (e.key==='ArrowDown' || e.key==='ArrowUp' || e.key==='j' || e.key==='k'){ const list = filtered().sort(byPole); const i = list.findIndex(P=>P.i===CUR); const n = list[i + ((e.key==='ArrowDown'||e.key==='j')?1:-1)]; if (n){ e.preventDefault(); selectPole(n.i, true); } }
 });

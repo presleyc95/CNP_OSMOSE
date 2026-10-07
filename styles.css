@@ -306,3 +306,33 @@ a.btn{text-decoration:none;color:inherit}
   .pnotes{margin-top:12px;font-weight:600}
   .pnotes i{display:block;border-bottom:1px solid #777;height:26px}
 }
+
+/* ---------- circuits ---------- */
+#circSel{font-weight:600;max-width:260px}
+tr.curset td{background:var(--blue-soft)}
+tr.tot td{font-weight:600;border-top:2px solid var(--rule-strong)}
+/* ---------- map: full screen and all circuits ---------- */
+.mapwrap.full{position:fixed;inset:0;z-index:1000;background:var(--bg);display:flex;flex-direction:column;padding:calc(env(safe-area-inset-top,0px) + 10px) 12px calc(env(safe-area-inset-bottom,0px) + 10px)}
+.mapwrap.full .mapbar{margin-bottom:6px}
+.mapwrap.full .map{flex:1;height:auto;min-height:0}
+.mapwrap.full .legend{margin-bottom:6px}
+body.mapfull-on{overflow:hidden}
+.mapbar label{display:inline-flex;gap:6px;align-items:center}
+.leaflet-tooltip.circlbl{background:var(--surface);color:var(--ink);border:1px solid var(--rule-strong);font-family:var(--cond);font-weight:700;font-size:14px;box-shadow:0 1px 4px rgba(0,0,0,.25);opacity:.92}
+.leaflet-tooltip.circlbl.cur{border:2px solid var(--blue);color:var(--blue)}
+.leaflet-tooltip.circlbl::before{display:none}
+/* ---------- Excel options dialog ---------- */
+.dlg{border:1px solid var(--rule-strong);border-radius:12px;background:var(--surface);color:var(--ink);padding:20px 22px;width:min(560px,calc(100vw - 32px));max-height:calc(100vh - 40px)}
+.dlg::backdrop{background:rgba(5,10,20,.55)}
+.dlg h2{font-size:22px;margin-bottom:10px}
+.dlg fieldset{border:1px solid var(--rule);border-radius:8px;margin:0 0 12px;padding:6px 12px 8px}
+.dlg legend{font-weight:600;font-size:13px;color:var(--muted);padding:0 4px}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:6px 0;cursor:pointer}
+.opt input{margin-top:3px;flex:none}
+.opt span{display:flex;flex-direction:column}
+.opt small{color:var(--muted);font-size:12px}
+.opt.sub{padding:0 0 6px 26px;font-size:13px}
+.opt input:disabled+span{opacity:.5}
+.dlgbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.toast,.tip{z-index:1100}
