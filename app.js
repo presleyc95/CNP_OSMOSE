@@ -66,7 +66,7 @@ function readWorkbook(bytes, name, fallbackId){
   const tabs = wb.SheetNames.map(n=>{ const ws = wb.Sheets[n], rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null, raw:true, blankrows:true});
     const r0 = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']).s.r : 0;   // sheet row of rows[0], zero-based
     let hr = -1; for (let i=0;i<Math.min(10,rows.length);i++){ const ns = (rows[i]||[]).map(norm); if (ns.includes('poleno') || ns.includes('poleid') || ns.includes('polenumber')){ hr=i; break; } }
-    return {name:n, rows, hr, r0}; }).filter(t=>t.hr>=0);
+    return {name:n, ws, rows, hr, r0, c0: ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']).s.c : 0}; }).filter(t=>t.hr>=0);
   // the pole data sheet: the one with the most columns that has a pole number column
   const main = tabs.filter(t=>t.rows[t.hr].map(norm).some(x=>x==='poleno'||x==='polenumber')).sort((a,b)=>b.rows[b.hr].length-a.rows[a.hr].length)[0]
     || tabs.sort((a,b)=>b.rows[b.hr].length-a.rows[a.hr].length)[0];
@@ -88,6 +88,14 @@ function readWorkbook(bytes, name, fallbackId){
     const dup = {rows, same, diff, all: g};
     if (same) keep.push({...g[0], dup}); else g.forEach(x=>keep.push({...x, dup})); });
   POLES = keep.map((d,i)=>{ const P = buildPole(d.a,i); P.row = d.row; P.dup = d.dup || null; if (P.dup && !P.dup.same) P.key = `${P.id}@row${P.row}`; return P; });
+  const circs = [...new Set(POLES.map(P=>P.circuit).filter(Boolean))].sort(natural);
+  const id = circs.join(', ') || fallbackId || name.replace(/\.[^.]+$/,'');
+  // "CNP Initial Recommendation" columns that are Excel formulas (Sheet Rules) are worked out here as fields are filled in
+  const initCol = colIx('CNP Initial Reccomendation','CNP Initial Recommendation');
+  const calcInit = initCol>=0 && !!main.ws[XLSX.utils.encode_cell({r: main.r0+main.hr+1, c: main.c0+initCol})]?.f;
+  POLES.forEach(P=>P.orig = P.a.slice());
+  POLES = POLES.map(P=>applyEdits(P, id));   // unsaved edits kept in this browser
+  if (calcInit) POLES.forEach(calcInitRec);
   // work lists: every other sheet keyed by pole
   WL = tabs.filter(t=>t!==main).map(t=>{ const head = t.rows[t.hr].map(h=>h==null?'':String(h).trim()); const pi = head.map(norm).findIndex(x=>x==='poleid'||x==='poleno'||x==='polenumber');
     const kind = /replace/i.test(t.name) ? 'replace' : /brace/i.test(t.name) ? 'brace' : /addl|additional|ovh/i.test(t.name) ? 'addl' : 'other';
@@ -96,8 +104,10 @@ function readWorkbook(bytes, name, fallbackId){
   const byKey = new Map(); POLES.forEach(P=>{ if (!byKey.has(P.id)) byKey.set(P.id, []); byKey.get(P.id).push(P); });
   WL.forEach(w=>w.rows.forEach(r=>{ r.P = (byKey.get(r.pole)||[])[0]||null; if (r.P) r.P.wl.push({w, r}); }));
   runChecks();
-  const circs = [...new Set(POLES.map(P=>P.circuit).filter(Boolean))].sort(natural);
-  const ds = { id: circs.join(', ') || fallbackId || name.replace(/\.[^.]+$/,''), file: name, head: HEAD, hix: HIX, poles: POLES, wl: WL, iss: ISS };
+  const lkName = wb.SheetNames.find(n=>/^lookups?$/i.test(n.trim())), lookups = {};
+  if (lkName){ const lr = XLSX.utils.sheet_to_json(wb.Sheets[lkName], {header:1, defval:null, raw:false});
+    (lr[0]||[]).forEach((h,c)=>{ if (h) lookups[norm(h)] = lr.slice(1).map(r=>r[c]).filter(x=>x!=null && String(x).trim()!=='').map(x=>String(x).trim()); }); }
+  const ds = { id, file: name, head: HEAD, hix: HIX, poles: POLES, wl: WL, iss: ISS, bytes, sheetName: main.name, c0: main.c0, calcInit, lookups };
   POLES.forEach(P=>P.ds = ds); ISS.forEach(x=>x.ds = ds);
   return ds;
 }
@@ -169,10 +179,12 @@ function buildPole(a, i){
   P.remarks = String(v('COMMENTS','STRAND_1') ?? '').split(';').map(s=>s.trim()).filter(Boolean);
   P.recOs = v('OSMOSE REC TRUSS TYPE') || ''; P.recRec = v('RECOMMENDED TRUSS TYPE') || '';
   P.truss = v('RECOMMENDED TRUSS SIZE') || '';
-  P.cnpInit = v('CNP Initial Reccomendation','CNP Initial Recommendation') || ''; P.cnpInitType = v('CNP Initial Reccomendation Type','CNP Initial Recommendation Type') || '';
-  P.designer = v('Designer Reccommendation','Designer Recommendation') || '';
-  P.final = v('CNP Final Reccomendation Type','CNP Final Recommendation Type','CNP Final Recommendation') || '';
-  P.final2 = v('CNP Final Reccomendation Type2') || '';
+  // first column that exists, even if blank (newer sheets have "CNP Final Reccomendation" plus a separate "...Type")
+  const vc = (...n) => { for (const k of n){ const j = hix.get(norm(k)); if (j!=null) return a[j]; } return null; };
+  P.cnpInit = vc('CNP Initial Reccomendation','CNP Initial Recommendation') || ''; P.cnpInitType = vc('CNP Initial Reccomendation Type','CNP Initial Recommendation Type') || '';
+  P.designer = vc('Designer Reccommendation','Designer Recommendation') || '';
+  P.final = vc('CNP Final Reccomendation','CNP Final Recommendation','CNP Final Reccomendation Type','CNP Final Recommendation Type') || '';
+  P.finalType = hix.has(norm('CNP Final Reccomendation')) || hix.has(norm('CNP Final Recommendation')) ? (vc('CNP Final Reccomendation Type','CNP Final Recommendation Type') || '') : (v('CNP Final Reccomendation Type2') || '');
   P.notes = v('Notes') || ''; P.cnpNotes = v('CNP Notes') || '';
   P.bOs = bucket(P.recOs); P.bRec = bucket(P.recRec); P.bDes = bucket(P.designer); P.bInit = bucket(P.cnpInit); P.bFin = bucket(P.final);
   P.media = ['Media','Media_2','Media_3','Media_4','Media_5','Media_6','Media_7'].map(k=>v(k)).filter(Boolean);
@@ -191,12 +203,14 @@ function runChecks(){
   const miles = (la,lo) => { const R=3958.8, r=Math.PI/180, dLa=(la-cLat)*r, dLo=(lo-cLon)*r; const h=Math.sin(dLa/2)**2+Math.cos(cLat*r)*Math.cos(la*r)*Math.sin(dLo/2)**2; return 2*R*Math.asin(Math.sqrt(h)); };
   const onList = (P, kind) => P.wl.some(e=>e.w.kind===kind);
   const hasList = kind => WL.some(w=>w.kind===kind);
+  const anyFinal = POLES.some(P=>P.bFin);
   POLES.forEach(P=>{
     const fin = BKL[P.bFin] || P.final;
     if (P.dup){ const rows = P.dup.rows, list = rows.length===2 ? `${rows[0]} and ${rows[1]}` : rows.join(', ');
       if (P.dup.same) add(P,'warn','Data',`Pole ${P.id} is in the sheet ${rows.length} times (rows ${list}) with identical data`,'Shown once here. The extra row can be removed from the sheet.');
       else add(P,'bad','Data',`Pole ${P.id} is on rows ${list} with different data (this is row ${P.row})`,`${P.dup.diff.length} column${P.dup.diff.length===1?'':'s'} differ: ${P.dup.diff.slice(0,10).map(i=>HEAD[i]).join(', ')}${P.dup.diff.length>10?`, and ${P.dup.diff.length-10} more`:''}. Each row is shown separately; see the comparison on the pole page.`); }
-    if (!P.bFin) add(P,'bad','Recommendation','No CNP final recommendation','The CNP Final Recommendation column is blank for this pole.');
+    // a sheet still being filled in has no CNP finals yet; only flag gaps once CNP has started giving them
+    if (!P.bFin && anyFinal) add(P,'warn','Recommendation','No CNP final recommendation yet','The CNP Final Recommendation column is blank for this pole.');
     if (!P.osm) add(P,'info','Data','No Osmose inspection data for this pole', P.notes ? `Notes: ${P.notes}` : 'Only the designer survey columns are filled in.');
     if (P.bOs in RANK && P.bFin in RANK){
       if (RANK[P.bFin] < RANK[P.bOs]) add(P,'warn','Recommendation',`CNP final (${fin}) is lighter than Osmose (${P.recOs})`, P.cnpNotes ? `CNP notes: ${P.cnpNotes}` : 'No CNP note explains the change.');
@@ -277,6 +291,7 @@ function renderKpis(){
     k(f0(c('Run SA')),'CNP final: Run SA', `${pct(c('Run SA'),n)}%`, '', {fin:'Run SA'}),
     k(f0(bad+warn),'Findings', `${bad} errors, ${warn} warnings`, bad?'bad':warn?'warn':'ok', {}, 'findings'),
     k(`${done}/${n}`,'Reviewed', `${pct(done,n)}%`, done===n?'ok':'', {rev:'todo'}),
+    ...(fieldsOf(DS).length ? [k(`${POLES.filter(fillDone).length}/${n}`,'Designer rec filled', `${pct(POLES.filter(fillDone).length,n)}% · ${editTotal(DS)} unsaved`, POLES.every(fillDone)?'ok':'warn', {}, 'fill')] : []),
   ].join('');
 }
 
@@ -297,13 +312,15 @@ function circuitsCard(){
 }
 
 /* ---------- tabs ---------- */
-const TABS = [['overview','Overview'],['map','Map'],['poles','Poles'],['recs','Recommendations'],['over','Over 99% load'],['findings','Findings'],['lists','Work lists'],['data','All data']];
+const TABS = [['overview','Overview'],['map','Map'],['poles','Poles'],['fill','Fill in'],['recs','Recommendations'],['over','Over 99% load'],['findings','Findings'],['lists','Work lists'],['data','All data']];
 function render(){
   if (MAP){ try{ MAP.remove(); }catch(e){} MAP = null; }
   const cnt = {poles: anyFilter() ? `${filtered().length}/${POLES.length}` : POLES.length, findings: ISS.filter(x=>x.sev!=='info').length, over: overloaded().length, lists: WL.reduce((s,w)=>s+w.rows.length,0)};
-  $('#tabs').innerHTML = TABS.filter(([k])=>k!=='lists' || WL.length).map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${TAB===k}">${l}${cnt[k]!=null?`<span class="n">${cnt[k]}</span>`:''}</button>`).join('');
+  cnt.fill = fieldsOf(DS).length ? `${POLES.filter(P=>fillDone(P)).length}/${POLES.length}` : null;
+  renderEditBar();
+  $('#tabs').innerHTML = TABS.filter(([k])=>(k!=='lists' || WL.length) && (k!=='fill' || fieldsOf(DS).length)).map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${TAB===k}">${l}${cnt[k]!=null?`<span class="n">${cnt[k]}</span>`:''}</button>`).join('');
   const v = $('#view'), keepScroll = $('#plist') ? [$('#plist').scrollTop, $('#plist').scrollLeft] : null;
-  v.innerHTML = TAB==='overview' ? vOverview() : TAB==='map' ? vMap() : TAB==='poles' ? vPoles() : TAB==='recs' ? vRecs() : TAB==='findings' ? vFindings() : TAB==='lists' ? vLists() : TAB==='over' ? vOver() : vData();
+  v.innerHTML = TAB==='overview' ? vOverview() : TAB==='map' ? vMap() : TAB==='poles' ? vPoles() : TAB==='recs' ? vRecs() : TAB==='findings' ? vFindings() : TAB==='lists' ? vLists() : TAB==='over' ? vOver() : TAB==='fill' ? vFill() : vData();
   if (TAB==='map') initMap();
   if (keepScroll && $('#plist')){ $('#plist').scrollTop = keepScroll[0]; $('#plist').scrollLeft = keepScroll[1]; }
 }
@@ -458,11 +475,12 @@ function vPoles(){
   const P = POLES[CUR];
   const sevDot = P => P.iss.some(x=>x.sev==='bad') ? 'bad' : P.iss.some(x=>x.sev==='warn') ? 'warn' : 'ok';
   return `${filterBar()}<div class="md">
-    <div class="plist" id="plist">${list.length ? list.map(Q=>`<button class="pcard" data-pole="${Q.i}" aria-current="${Q.i===CUR}"><span class="dot ${sevDot(Q)}" title="${Q.iss.filter(x=>x.sev!=='info').length} findings"></span><b>${esc(Q.id)}${rev(Q).ok?' <span class="tick" title="Reviewed">✓</span>':''}</b>${recPill(Q.bFin, BKL[Q.bFin])}<span class="spec">${Q.ds.changed?.has(Q.key)?'<b class="upd">Updated</b> · ':''}${esc([Q.dup&&!Q.dup.same&&`Row ${Q.row}`, Q.hc, Q.sec&&`Sec ${Q.sec}`, Q.load!=null&&`${Q.load}%`].filter(Boolean).join(' · '))}</span></button>`).join('') : '<p class="muted">No poles match these filters.</p>'}</div>
+    <div class="plist" id="plist">${list.length ? list.map(Q=>`<button class="pcard" data-pole="${Q.i}" aria-current="${Q.i===CUR}"><span class="dot ${sevDot(Q)}" title="${Q.iss.filter(x=>x.sev!=='info').length} findings"></span><b>${esc(Q.id)}${rev(Q).ok?' <span class="tick" title="Reviewed">✓</span>':''}</b>${recPill(Q.bFin, BKL[Q.bFin])}<span class="spec">${pcardSpec(Q)}</span></button>`).join('') : '<p class="muted">No poles match these filters.</p>'}</div>
     <div class="detail">${P ? poleDetail(P, list) : ''}</div></div>`;
 }
 const kv = (rows) => `<table class="kvt">${rows.filter(r=>r && r[1]!=null && r[1]!=='').map(([k,v,cls])=>`<tr><th>${esc(k)}</th><td class="${cls||''}">${v}</td></tr>`).join('')}</table>`;
 const yn = v => v==null ? null : esc(show(v));
+const pcardSpec = Q => `${editCount(Q)?'<b class="upd">Edited</b> · ':Q.ds.changed?.has(Q.key)?'<b class="upd">Updated</b> · ':''}${esc([Q.dup&&!Q.dup.same&&`Row ${Q.row}`, Q.hc, Q.sec&&`Sec ${Q.sec}`, Q.load!=null&&`${Q.load}%`].filter(Boolean).join(' · '))}`;
 function poleDetail(P, list){
   const v = P.v, R = rev(P), idx = list.findIndex(Q=>Q.i===P.i);
   const prev = list[idx-1], next = list[idx+1];
@@ -475,6 +493,7 @@ function poleDetail(P, list){
     <button class="btn sm" data-pole="${prev?.i??''}" ${prev?'':'disabled'}>← Prev</button><button class="btn sm" data-pole="${next?.i??''}" ${next?'':'disabled'}>Next →</button></div>
   <div class="path">${steps.map(([l,t,b],i)=>`${i?'<span class="arr" aria-hidden="true">→</span>':''}<div class="step ${t?BKC[b]:'none'}"><div class="sl">${l}</div><div class="sv">${esc(t||'—')}</div></div>`).join('')}</div>
   ${P.truss||v('ReccLengthReplace')?`<p class="muted" style="margin:6px 0 0;font-size:13px">${P.truss?`Truss size: <b>${esc(P.truss)}</b>. `:''}${v('ReccLengthReplace')?`Osmose replacement size if replaced: <b>${esc(v('ReccLengthReplace'))}-${esc(v('ReccClassReplace')??'')}</b>.`:''}</p>`:''}
+  ${fillForm(P)}
   <div class="review"><label class="ck"><input type="checkbox" data-rev="${P.i}" ${R.ok?'checked':''}> Reviewed</label><input type="text" class="revnote" data-revnote="${P.i}" placeholder="Your review note (saved in this browser)" value="${esc(R.note||'')}"></div>
   ${P.iss.length?`<div class="sec"><h3>Findings <span class="n muted sm">${P.iss.length}</span></h3><div class="issues">${P.iss.map(x=>`<div class="iss ${x.sev}"><b>${esc(x.title)}</b>${x.detail?`<div class="w">${esc(x.detail)}</div>`:''}</div>`).join('')}</div></div>`:''}
   ${(P.notes||P.cnpNotes)?`<div class="sec grid2s">${P.notes?`<div class="note"><b>Designer notes</b><p>${esc(P.notes)}</p></div>`:''}${P.cnpNotes?`<div class="note"><b>CNP notes</b><p>${esc(P.cnpNotes)}</p></div>`:''}</div>`:''}
@@ -754,7 +773,7 @@ const fdIgnore = () => { try { return new Set(JSON.parse(localStorage.getItem('o
 const fdIgnoreSave = set => { try{ localStorage.setItem('osmrev:fdignore', JSON.stringify([...set])); }catch(e){} };
 const hhmm = d => d ? d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '';
 const canFolder = () => 'showDirectoryPicker' in window;
-async function permState(h, ask){ try { if (!h.queryPermission) return 'granted'; let p = await h.queryPermission({mode:'read'}); if (p!=='granted' && ask) p = await h.requestPermission({mode:'read'}); return p; } catch(e){ return 'denied'; } }
+async function permState(h, ask, mode='read'){ try { if (!h.queryPermission) return 'granted'; let p = await h.queryPermission({mode}); if (p!=='granted' && ask) p = await h.requestPermission({mode}); return p; } catch(e){ return 'denied'; } }
 async function scanDir(dir, prefix='', depth=0, out=[]){
   for await (const [name, h] of dir.entries()){
     if (h.kind==='directory'){ if (depth<3 && !name.startsWith('.') && !/^(_?archive|old|superseded|backup)/i.test(name)) await scanDir(h, `${prefix}${name}/`, depth+1, out); }
@@ -779,7 +798,7 @@ function unlinkFolder(silent){
 function startPolling(){ stopPolling(); if (POLL>0) FDTIMER = setInterval(()=>checkFolder(false), POLL*1000); }
 function stopPolling(){ if (FDTIMER) clearInterval(FDTIMER); FDTIMER = null; }
 // don't redraw the page while someone is typing or has the download dialog open
-const uiBusy = () => $('#xlDlg').open || (/^(input|textarea|select)$/i.test(document.activeElement?.tagName||'') && Date.now()-LASTKEY < 15000);
+const uiBusy = () => $('#xlDlg').open || $('#edDlg').open || !!document.querySelector('.ec.editing') || (/^(input|textarea|select)$/i.test(document.activeElement?.tagName||'') && Date.now()-LASTKEY < 15000);
 async function checkFolder(initial, manual){
   if (!FOLDER || FOLDER.busy) return;
   if (!initial && !manual && uiBusy()){ setTimeout(()=>checkFolder(false), 5000); return; }
@@ -840,11 +859,7 @@ async function applyFolder(changed, removed, initial){
   SETS.sort((a,b)=>natural(a.id,b.id));
   if (!SETS.length){ if (DS) useSet(DS); return; }
   if ($('#app').hidden){ let pick = null; try{ pick = localStorage.getItem('osmrev:cur'); }catch(e){} start(SETS.find(x=>x.id===pick) || SETS[0]); return; }
-  // refresh in place: same circuit, tab, filters, selected pole, map view and scroll
-  const ds = SETS.find(x=>x.id===curId) || SETS[0];
-  useSet(ds); if (ds.id!==curId){ CUR = null; FIL = NOFIL(); }
-  else if (curKey){ const P = POLES.find(x=>x.key===curKey); CUR = P ? P.i : null; }
-  const y = window.scrollY; renderHead(); renderKpis(); render(); window.scrollTo(0, y);
+  refreshInPlace(curId, curKey);
   if (msgs.length) toast(`Updated from ${FOLDER.name}: ${msgs.join(' · ')}`, 6000);
 }
 function renderFolder(){
@@ -888,6 +903,8 @@ try{ const t = localStorage.getItem('osmrev:theme'); if (t) document.documentEle
 
 /* ---------- events ---------- */
 // change the selected pole without rebuilding the list, so the sidebar keeps its scroll position
+function rerenderDetail(){ const det = document.querySelector('.detail'); if (TAB!=='poles' || !det || CUR==null) return; det.innerHTML = poleDetail(POLES[CUR], filtered().sort(byPole));
+  const card = document.querySelector(`.pcard[data-pole="${CUR}"]`); if (card){ const Q = POLES[CUR]; card.querySelector('.spec').outerHTML = `<span class="spec">${pcardSpec(Q)}</span>`; } }
 function selectPole(i, reveal){
   const list = $('#plist'), det = document.querySelector('.detail');
   if (TAB!=='poles' || !list || !det){ CUR = i; render(); return; }
@@ -905,7 +922,16 @@ function revealCard(card){ const list = $('#plist'); if (!list || !card) return;
   if (C.top < L.top) list.scrollTop -= L.top - C.top + 4; else if (C.bottom > L.bottom) list.scrollTop += C.bottom - L.bottom + 4; }
 function openPole(i){ CUR = +i; if (!filtered().some(P=>P.i===CUR)) FIL = NOFIL(); TAB = 'poles'; render(); revealCard(document.querySelector('.pcard[aria-current="true"]')); window.scrollTo({top: $('#kpis').offsetTop-70}); }
 document.addEventListener('click', e=>{
-  const t = e.target.closest('button,[data-open],[data-kf],th[data-sort],[data-copytext],td[data-kf],i[data-kf]'); if (!t) return;
+  const t = e.target.closest('button,[data-open],[data-kf],th[data-sort],[data-copytext],td[data-kf],i[data-kf],td[data-ec]'); if (!t) return;
+  if (t.dataset.ec && !t.classList.contains('editing')){ openCell(t); return; }
+  if (t.dataset.useosm){ const [i,k] = t.dataset.useosm.split('|'); const P = POLES[+i], f = fieldsOf(DS)[+k]; setEdit(P, f, f.osm(P)); afterEdit(); return; }
+  if (t.dataset.undo){ const [i,k] = t.dataset.undo.split('|'); const P = POLES[+i], f = fieldsOf(DS)[+k]; setEdit(P, f, P.orig[f.idx]); afterEdit(); return; }
+  if (t.dataset.saveed){ openSave(); return; }
+  if (t.dataset.discard){ if (confirm(`Discard all ${editTotal(DS)} unsaved changes for circuit ${DS.id}?`)) discardEdits(DS); return; }
+  if (t.dataset.fillshow!=null){ FILLF.show = t.dataset.fillshow; render(); return; }
+  if (t.dataset.bulkapply){ bulkApply(); return; }
+  if (t.dataset.bulkosm){ bulkOsmose(); return; }
+  if (t.dataset.fselall!=null){ const on = !fillList().every(P=>FILLSEL.has(P.key)); fillList().forEach(P=>on?FILLSEL.add(P.key):FILLSEL.delete(P.key)); render(); return; }
   if (t.dataset.tab){ TAB = t.dataset.tab; render(); return; }
   if (t.dataset.kf){ setFilter(JSON.parse(t.dataset.kf), t.dataset.kt); return; }
   if (t.dataset.open!=null && t.dataset.open!==''){ if (MAP) MAP.closePopup();
@@ -933,6 +959,12 @@ document.addEventListener('change', e=>{
   const t = e.target;
   if (t.dataset.f && t.dataset.f!=='q'){ FIL[t.dataset.f] = t.value; render(); return; }
   if (t.dataset.mapbysel){ MAPBY = t.value; render(); return; }
+  if (t.dataset.fe){ const [i,k] = t.dataset.fe.split('|'); const P = POLES[+i], f = fieldsOf(DS)[+k]; setEdit(P, f, t.value); afterEdit(); return; }
+  if (t.dataset.fillq!=null){ FILLF.q = t.value; render(); return; }
+  if (t.dataset.fillsec!=null){ FILLF.sec = t.value; render(); return; }
+  if (t.dataset.bulkf!=null){ FILLBULK.k = t.value; FILLBULK.v = ''; render(); return; }
+  if (t.dataset.bulkv!=null){ FILLBULK.v = t.value; return; }
+  if (t.dataset.fsel){ t.checked ? FILLSEL.add(t.dataset.fsel) : FILLSEL.delete(t.dataset.fsel); const b = document.querySelector('[data-bulkapply]'); renderBulkCount(); return; }
   if (t.dataset.fdpoll){ POLL = +t.value; try{ localStorage.setItem('osmrev:poll', POLL); }catch(e){} startPolling(); toast(POLL ? `Checking every ${POLLS.find(x=>x[0]===POLL)[1]}` : 'Automatic checks off'); return; }
   if (t.dataset.icat){ IFIL.cat = t.value; render(); return; }
   if (t.dataset.rev!=null){ const P = POLES[+t.dataset.rev]; REV[P.key] = {...rev(P), ok: t.checked}; saveRev(); renderKpis(); const y = window.scrollY; render(); window.scrollTo(0,y); toast(t.checked ? `Pole ${P.id} marked reviewed` : `Pole ${P.id} unmarked`); return; }
@@ -954,6 +986,329 @@ document.addEventListener('keydown', e=>{
 const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true; document.body.appendChild(tip);
 document.addEventListener('mouseover', e=>{ const t = e.target.closest('[data-tip]'); if (!t){ tip.hidden = true; return; } tip.textContent = t.dataset.tip; tip.hidden = false; });
 document.addEventListener('mousemove', e=>{ if (tip.hidden) return; const w = tip.offsetWidth; tip.style.left = Math.min(window.innerWidth-w-8, e.clientX+14)+'px'; tip.style.top = (e.clientY+16)+'px'; });
+
+/* ---------- filling in the designer / CNP columns ----------
+   Edits are kept in this browser (localStorage) until saved. Saving patches only the edited cells inside the .xlsx
+   (plus the cached results of the CNP Initial formula cells on those rows), so formatting, drop-down lists, tables,
+   formulas and SharePoint metadata in the workbook are left as they were. */
+let EDITS = {}; try { EDITS = JSON.parse(localStorage.getItem('osmrev:edits')||'{}'); } catch(e){}
+const saveEditsLS = () => { try{ localStorage.setItem('osmrev:edits', JSON.stringify(EDITS)); }catch(e){ toast('Could not keep edits in this browser (storage full?)'); } };
+const sameVal = (a,b) => String(a??'').trim() === String(b??'').trim();
+const YN = 'Tree Trimming/Conductor/Feeder';
+const LISTS = {   // used when a workbook has no Lookups sheet
+  'Major Equipment Type':['≥3-250kVA Bank','3ph TP','Cap Bank','IGSD','PTS','Regulator'], 'Major Scenario Type':['First Section','Double Stack','Junction Pole','Slack 3ph Across Road, Etc.','Standing Water Area'],
+  'Equipment Type':['URD TP','≥3-167kVA Bank','≥3-100kVA Bank','Primary Metering Pole','4G/5G Antenna Pole'], 'Pole Composition':['Wood','FBGL','DI','Concrete','Steel'],
+  'Wood Pecker Damage':['Low','Moderate','Severe'], 'Crossing Type':['Railroad','FWY X','Water/Drainage'], [YN]:['Yes','No'],
+  'Design Reccommendations':['Brace','N/A','Pole OK','Replace'], 'CNP Recommendation':['Brace','N/A','Pole Ok','Remove','Replace','Run SA','See Note'] };
+const comp = P => { const m = String(P.v('StructMat')||P.v('Pole Composition')||''); return /fiber|fbgl/i.test(m)?'FBGL':/wood/i.test(m)?'Wood':/steel/i.test(m)?'Steel':/concrete/i.test(m)?'Concrete':/ductile|^di$/i.test(m)?'DI':''; };
+const FIELDDEFS = [
+  {g:'Designer survey', h:['Major Equipment Type'], list:'Major Equipment Type'},
+  {g:'Designer survey', h:['Major Equipment Stencil']},
+  {g:'Designer survey', h:['Major Scenario Type'], list:'Major Scenario Type'},
+  {g:'Designer survey', h:['Equipment Type'], list:'Equipment Type'},
+  {g:'Designer survey', h:['Equipment Stencil']},
+  {g:'Designer survey', h:['Pole Composition'], list:'Pole Composition', osm:comp},
+  {g:'Designer survey', h:['Height & Class'], ph:'e.g. 55-2', osm:P=>P.hcField && !hcUnknown(P.hcField) ? P.hcField : ''},
+  {g:'Designer survey', h:['Wood Pecker Damage'], list:'Wood Pecker Damage'},
+  {g:'Designer survey', h:['Crossing Type'], list:'Crossing Type'},
+  {g:'Designer survey', h:['OVH Issues']},
+  {g:'Designer survey', h:['Tree Trimming Needed'], list:YN, short:'Tree trim'},
+  {g:'Designer survey', h:['Is Primary Conductor <600 AAC'], list:YN, short:'Primary <600 AAC'},
+  {g:'Designer survey', h:['Truck Access?'], list:YN, short:'Truck access'},
+  {g:'Designer survey', h:['Valid Feeder Pole & Circuit'], list:YN, short:'Valid feeder'},
+  {g:'Designer survey', h:['Circuit Section'], osm:P=>P.v('CIRC_SECT') ?? ''},
+  {g:'Designer survey', h:['Permit Type'], suggest:true},
+  {g:'Designer survey', h:['Notes'], long:true},
+  {g:'Designer survey', h:['Designer Reccommendation','Designer Recommendation'], list:'Design Reccommendations', key:true, short:'Designer rec'},
+  {g:'CNP review', h:['CNP Final Reccomendation','CNP Final Recommendation','CNP Final Reccomendation Type'], list:'CNP Recommendation', short:'CNP final'},
+  {g:'CNP review', h:['CNP Final Reccomendation Type','CNP Final Recommendation Type'], needs:['CNP Final Reccomendation','CNP Final Recommendation'], suggest:['Fiberglass','Ductile Iron'], short:'CNP final type'},
+  {g:'CNP review', h:['CNP Notes'], long:true},
+];
+const niceLabel = h => h.trim().replace(/Recc?omm?endation/gi,'Recommendation').replace(/^Is /,'').replace(/\?$/,'');
+// the editable columns present in a circuit's workbook
+function fieldsOf(ds){
+  if (!ds) return []; if (ds.fields) return ds.fields;
+  const used = new Set(), out = [];
+  FIELDDEFS.forEach(d=>{ if (d.needs && !d.needs.some(n=>ds.hix.has(norm(n)))) return;
+    const header = d.h.find(n=>ds.hix.has(norm(n))); if (!header) return; const idx = ds.hix.get(norm(header)); if (used.has(idx)) return; used.add(idx);
+    const opts = d.list ? (ds.lookups?.[norm(d.list)]?.length ? ds.lookups[norm(d.list)] : LISTS[d.list] || []) : null;
+    out.push({...d, header: ds.head[idx], idx, label: niceLabel(ds.head[idx]), short: d.short || niceLabel(ds.head[idx]), opts}); });
+  return ds.fields = out;
+}
+const keyField = ds => fieldsOf(ds).find(f=>f.key);
+const fillDone = P => { const f = keyField(P.ds); return !f || P.a[f.idx]!=null; };
+const editCount = P => Object.keys(EDITS[P.ds.id]?.[P.key] || {}).length;
+const editTotal = ds => ds ? Object.values(EDITS[ds.id] || {}).reduce((n,e)=>n+Object.keys(e).length, 0) : 0;
+const editPoles = ds => ds ? Object.keys(EDITS[ds.id] || {}).length : 0;
+const conflictTotal = ds => ds ? Object.values(EDITS[ds.id] || {}).reduce((n,e)=>n+Object.values(e).filter(x=>x.conflict).length, 0) : 0;
+function applyEdits(P, id){
+  const E = EDITS[id]?.[P.key]; if (!E) return P;
+  Object.entries(E).forEach(([h,e])=>{ const j = HIX.get(norm(h)); if (j==null) return; e.conflict = !sameVal(P.orig[j], e.was); P.a[j] = e.v; });
+  const Q = buildPole(P.a, P.i); Q.row = P.row; Q.dup = P.dup; Q.key = P.key; Q.orig = P.orig; return Q;
+}
+// Sheet Rules: the workbook's CNP Initial Recommendation / Type formulas, worked out the same way Excel does
+function calcInitRec(P){
+  const v = P.v, eq = (a,b) => String(a??'').trim().toLowerCase()===String(b).toLowerCase(), any = (x,l) => l.some(y=>eq(x,y));
+  const FW = P.recRec, HA = P.designer, GH = v('Major Equipment Type'), GJ = v('Major Scenario Type'), GM = v('Pole Composition');
+  const big = ['≥3-250kVA Bank','IGSD','Regulator'], slack = ['Double Stack','Slack 3ph Across Road, Etc.'], tp = ['3ph TP','Cap Bank','PTS'], sec = ['First Section','Junction Pole','Standing Water Area'];
+  let r = '';
+  if (eq(FW,'Pole OK') && eq(HA,'Pole OK')) r = 'Pole OK';
+  else if ((GH!=null || GJ!=null) && eq(GM,'Wood')) r = 'Replace';
+  else if (any(GH,big) || any(GJ,slack)) r = eq(GM,'DI') ? 'Pole OK' : 'Replace';
+  else if (any(GH,tp)) r = eq(GM,'FBGL') ? 'Pole OK' : 'Replace';
+  else if (any(GJ,sec)) r = eq(GM,'FBGL') ? 'Pole OK' : 'Replace';
+  let t = '';
+  if (any(GH,big) && (eq(GM,'Wood') || eq(GM,'FBGL'))) t = 'Ductile Iron';
+  else if (any(GH,tp) && (eq(GM,'Wood') || eq(GM,'DI'))) t = 'Fiberglass';
+  else if (any(GJ,sec)) t = 'Fiberglass';
+  else if (any(GJ,slack)) t = 'Ductile Iron';
+  const ci = colIx('CNP Initial Reccomendation','CNP Initial Recommendation'), ti = colIx('CNP Initial Reccomendation Type','CNP Initial Recommendation Type');
+  if (ci>=0) P.a[ci] = r || null; if (ti>=0) P.a[ti] = t || null;
+  P.cnpInit = r; P.cnpInitType = t; P.bInit = bucket(r);
+}
+// rebuild a circuit's derived data after its values change
+function rebuildSet(ds){
+  const prev = DS; useSet(ds);
+  POLES = ds.poles.map(P=>{ const Q = buildPole(P.a, P.i); Q.row = P.row; Q.dup = P.dup; Q.key = P.key; Q.orig = P.orig; Q.ds = ds; return Q; });
+  if (ds.calcInit) POLES.forEach(calcInitRec);
+  const byKey = new Map(); POLES.forEach(P=>{ if (!byKey.has(P.id)) byKey.set(P.id, P); });
+  WL.forEach(w=>w.rows.forEach(r=>{ r.P = byKey.get(r.pole) || null; if (r.P) r.P.wl.push({w, r}); }));
+  ds.poles = POLES; runChecks(); ds.iss = ISS; ISS.forEach(x=>x.ds = ds);
+  useSet(prev && prev!==ds ? prev : ds);
+}
+function setEdit(P, f, raw){
+  const ds = P.ds; let val = raw==null ? '' : String(raw).trim();
+  const v = val==='' ? null : (!f.list && /^(0|[1-9]\d*)(\.\d+)?$/.test(val)) ? +val : val;   // numbers (e.g. circuit section) stay numbers
+  const E = (EDITS[ds.id] ||= {}), PE = (E[P.key] ||= {}), orig = P.orig[f.idx];
+  if (sameVal(v, orig)) delete PE[f.header];
+  else PE[f.header] = {v, was: PE[f.header] ? PE[f.header].was : (orig ?? null), conflict: PE[f.header]?.conflict || false, at: Date.now()};
+  if (!Object.keys(PE).length) delete E[P.key]; if (!Object.keys(E).length) delete EDITS[ds.id];
+  saveEditsLS(); P.a[f.idx] = v; rebuildSet(ds);
+}
+function discardEdits(ds){
+  Object.entries(EDITS[ds.id] || {}).forEach(([k,E])=>{ const P = ds.poles.find(x=>x.key===k); if (P) Object.keys(E).forEach(h=>{ const j = ds.hix.get(norm(h)); if (j!=null) P.a[j] = P.orig[j]; }); });
+  delete EDITS[ds.id]; saveEditsLS(); rebuildSet(ds); afterEdit(true); toast('Unsaved changes discarded');
+}
+// after an edit: refresh what depends on it without losing the field you tabbed to
+function afterEdit(full){
+  const a = document.activeElement?.dataset?.fe;
+  renderKpis(); renderEditBar();
+  if (full || TAB!=='poles'){ const y = window.scrollY, sc = document.querySelector('.fillscroll'), st = sc && [sc.scrollTop, sc.scrollLeft]; render(); window.scrollTo(0,y); const sc2 = document.querySelector('.fillscroll'); if (sc2 && st){ sc2.scrollTop = st[0]; sc2.scrollLeft = st[1]; } return; }
+  setTimeout(()=>{ rerenderDetail(); if (a) document.querySelector(`[data-fe="${a}"]`)?.focus(); const tb = document.querySelector('.tab[data-tab="fill"] .n'); if (tb) tb.textContent = `${POLES.filter(fillDone).length}/${POLES.length}`; }, 0);
+}
+function control(P, f, k, attr){
+  const val = P.a[f.idx], sv = show(val);
+  if (f.opts){ const opts = [...f.opts]; if (sv && !opts.some(o=>sameVal(o,sv))) opts.unshift(sv);
+    return `<select ${attr}><option value=""${sv?'':' selected'}>—</option>${opts.map(o=>`<option ${sameVal(o,sv)?'selected':''}>${esc(o)}</option>`).join('')}</select>`; }
+  const list = f.suggest ? `list="dl-${k}"` : '';
+  if (f.long) return `<textarea ${attr} rows="2">${esc(sv)}</textarea>`;
+  return `<input type="text" ${attr} ${list} value="${esc(sv)}" placeholder="${esc(f.ph||'')}">`;
+}
+function datalists(ds){
+  return fieldsOf(ds).map((f,k)=>{ if (!f.suggest) return ''; const seen = new Set(Array.isArray(f.suggest) ? f.suggest : []); SETS.forEach(s=>s.poles.forEach(P=>{ const j = s.hix.get(norm(f.header)); if (j!=null && P.a[j]!=null) seen.add(show(P.a[j])); }));
+    return `<datalist id="dl-${k}">${[...seen].sort(natural).map(x=>`<option value="${esc(x)}">`).join('')}</datalist>`; }).join('');
+}
+function fillForm(P){
+  const fs = fieldsOf(P.ds); if (!fs.length) return '';
+  const E = EDITS[P.ds.id]?.[P.key] || {}, groups = [...new Set(fs.map(f=>f.g))];
+  const filled = fs.filter(f=>P.a[f.idx]!=null).length;
+  return `<details class="fill sec" ${filled<fs.length || Object.keys(E).length ? 'open' : ''}><summary><b>Fill in</b> <span class="muted sm">${filled} of ${fs.length} filled${Object.keys(E).length?` · <span class="upd">${Object.keys(E).length} unsaved</span>`:''}</span></summary>
+    ${groups.map(g=>`<div class="fgroup"><div class="sm muted fgl">${g}</div><div class="fgrid">${fs.map((f,k)=>{ if (f.g!==g) return ''; const e = E[f.header], o = f.osm && f.osm(P);
+      return `<label class="ff ${f.long?'wide':''} ${e?'pend':''} ${e?.conflict?'conf':''}"><span class="fl">${esc(f.label)}${f.key?' <b class="req">*</b>':''}</span>${control(P, f, k, `data-fe="${P.i}|${k}"`)}
+        <span class="fh">${e ? `${e.conflict?`<b class="badtxt">Changed in the file since you edited it: now "${esc(show(P.orig[f.idx]))}"</b>. `:`Unsaved · was ${P.orig[f.idx]==null?'blank':`"${esc(show(P.orig[f.idx]))}"`}. `}<button type="button" class="link sm" data-undo="${P.i}|${k}">Undo</button>` : ''}${!e && o!=null && o!=='' && !sameVal(o, P.a[f.idx]) ? `<button type="button" class="link sm" data-useosm="${P.i}|${k}">Use Osmose: ${esc(o)}</button>` : ''}</span></label>`; }).join('')}</div></div>`).join('')}
+    ${P.ds.calcInit ? `<div class="sm muted" style="margin-top:6px">CNP initial recommendation (from the workbook's Sheet Rules): <b>${esc(P.cnpInit||'—')}</b>${P.cnpInitType?` · ${esc(P.cnpInitType)}`:''}</div>` : ''}
+    ${datalists(P.ds)}</details>`;
+}
+function renderEditBar(){
+  const bar = $('#editBar'); if (!DS){ bar.hidden = true; return; }
+  const n = editTotal(DS), c = conflictTotal(DS);
+  bar.hidden = !n; if (!n) return;
+  const toFile = DS.src && FOLDER;
+  bar.innerHTML = `<span><b>${n} unsaved change${n===1?'':'s'}</b> on ${editPoles(DS)} pole${editPoles(DS)===1?'':'s'} in circuit ${esc(DS.id)}${c?` · <span class="badtxt">${c} changed in the file since you edited</span>`:''} <span class="muted">· kept in this browser until saved</span></span>
+    <span class="spacer"></span><button class="btn sm primary" data-saveed="1">${toFile ? 'Save to workbook…' : 'Download updated workbook…'}</button><button class="btn sm" data-discard="1">Discard</button>`;
+}
+
+/* ---------- Fill in tab: a grid for working through many poles ---------- */
+let FILLF = {show:'', q:'', sec:''}, FILLSEL = new Set(), FILLBULK = {k:'', v:''};
+function fillList(){
+  const fs = fieldsOf(DS), q = FILLF.q.trim().toLowerCase();
+  return POLES.filter(P=>{
+    if (FILLF.show==='missing' && fillDone(P)) return false;
+    if (FILLF.show==='blanks' && fs.every(f=>f.long || f.g!=='Designer survey' || P.a[f.idx]!=null)) return false;
+    if (FILLF.show==='edited' && !editCount(P)) return false;
+    if (FILLF.sec && String(P.v('CIRC_SECT') ?? P.sec)!==FILLF.sec) return false;
+    if (q && !`${P.id} ${show(P.v('CIRC_SECT'))} ${P.recOs}`.toLowerCase().includes(q)) return false;
+    return true; }).sort(byPole);
+}
+function renderBulkCount(){ const el = $('#bulkN'); if (el) el.textContent = `${FILLSEL.size} selected`; document.querySelectorAll('[data-needsel]').forEach(b=>b.disabled = !FILLSEL.size); }
+function cellHtml(P, f, k){ const e = EDITS[DS.id]?.[P.key]?.[f.header], v = P.a[f.idx];
+  return `<td class="ec ${e?'pend':''} ${e?.conflict?'conf':''} ${f.long?'long':''}" data-ec="${P.i}|${k}" title="${esc(e ? `Unsaved · was ${P.orig[f.idx]==null?'blank':show(P.orig[f.idx])}` : f.label)}">${v==null?'<span class="blank">·</span>':esc(show(v))}</td>`; }
+function rowHtml(P){ const fs = fieldsOf(DS);
+  return `<tr data-frow="${P.i}"><td class="sel"><input type="checkbox" data-fsel="${esc(P.key)}" ${FILLSEL.has(P.key)?'checked':''} aria-label="Select pole ${esc(P.id)}"></td><th class="pid"><button class="link" data-open="${P.i}">${esc(P.id)}</button>${P.dup&&!P.dup.same?` <span class="muted sm">r${P.row}</span>`:''}</th>
+    <td>${esc(show(P.v('CIRC_SECT')))}</td><td>${P.recOs?recPill(P.bOs,P.recOs):'<span class="muted">—</span>'}</td><td class="num">${P.load??''}</td><td>${esc(P.hcField)}</td>
+    ${fs.map((f,k)=>cellHtml(P,f,k)).join('')}${DS.calcInit?`<td class="calc">${P.cnpInit?recPill(P.bInit,P.cnpInit):''}${P.cnpInitType?` <span class="sm muted">${esc(P.cnpInitType)}</span>`:''}</td>`:''}</tr>`; }
+function vFill(){
+  const fs = fieldsOf(DS), list = fillList(), done = POLES.filter(fillDone).length, kf = keyField(DS);
+  FILLSEL.forEach(k=>{ if (!POLES.some(P=>P.key===k)) FILLSEL.delete(k); });
+  const secs = [...new Set(POLES.map(P=>String(P.v('CIRC_SECT') ?? P.sec)).filter(x=>x && x!=='null'))].sort(natural);
+  const bf = fs[+FILLBULK.k], bctl = !bf ? '' : bf.opts ? `<select class="fin" data-bulkv="1"><option value="">(blank)</option>${bf.opts.map(o=>`<option ${sameVal(o,FILLBULK.v)?'selected':''}>${esc(o)}</option>`).join('')}</select>` : `<input class="fin" data-bulkv="1" value="${esc(FILLBULK.v)}" placeholder="value" ${bf.suggest?`list="dl-${FILLBULK.k}"`:''}>`;
+  return `<div class="viewbar"><h2>Fill in</h2>
+    <div class="seg">${[['','All poles'],['missing',`No ${kf?esc(kf.short.toLowerCase()):'value'} (${POLES.length-done})`],['blanks','Any survey blank'],['edited',`Unsaved (${editPoles(DS)})`]].map(([k,l])=>`<button data-fillshow="${k}" aria-pressed="${FILLF.show===k}">${l}</button>`).join('')}</div>
+    <select class="fin" data-fillsec="1" aria-label="Section"><option value="">All sections</option>${secs.map(x=>`<option ${FILLF.sec===x?'selected':''}>${esc(x)}</option>`).join('')}</select>
+    <input type="search" class="fin" data-fillq="1" placeholder="Find pole…" value="${esc(FILLF.q)}" style="width:140px">
+    <div class="hint">${kf?`${esc(kf.short)} filled on ${done} of ${POLES.length} poles. `:''}Click a cell to edit; Enter moves down, Tab moves right, Esc cancels. Changes are kept in this browser until you save them to the workbook.</div></div>
+  <div class="bulk"><span id="bulkN">${FILLSEL.size} selected</span> <button class="link sm" data-fselall="1">Select / clear all shown (${list.length})</button>
+    <span class="sep"></span><label class="sm">Set <select class="fin" data-bulkf="1"><option value="">field…</option>${fs.map((f,k)=>`<option value="${k}" ${FILLBULK.k===String(k)?'selected':''}>${esc(f.label)}</option>`).join('')}</select></label> ${bf?`to ${bctl}`:''}
+    <button class="btn sm" data-bulkapply="1" data-needsel="1" ${!FILLSEL.size||!bf?'disabled':''}>Apply to selected</button>
+    <span class="sep"></span><button class="btn sm" data-bulkosm="1" data-needsel="1" ${FILLSEL.size?'':'disabled'} title="Fills only blank cells">Fill blanks from Osmose</button><span class="sm muted">height/class, circuit section, pole composition</span></div>
+  <div class="tscroll fillscroll"><table class="fillt"><thead><tr><th class="sel"></th><th class="pid">Pole</th><th>Osmose section</th><th>Osmose rec</th><th class="num">% load</th><th>Osmose H/C</th>${fs.map(f=>`<th class="${f.g==='CNP review'?'cnp':''}">${esc(f.short)}${f.key?' *':''}</th>`).join('')}${DS.calcInit?'<th>CNP initial (calc)</th>':''}</tr></thead>
+  <tbody>${list.map(rowHtml).join('') || `<tr><td colspan="${fs.length+7}" class="muted">No poles match.</td></tr>`}</tbody></table></div>${datalists(DS)}`;
+}
+function openCell(td){
+  const [i,k] = td.dataset.ec.split('|').map(Number), P = POLES[i], f = fieldsOf(DS)[k]; if (!P || !f) return;
+  td.classList.add('editing'); const prev = td.innerHTML; td.innerHTML = control(P, f, k, `data-ce="1"`);
+  const el = td.querySelector('[data-ce]'); el.focus(); if (el.select) try{ el.select(); }catch(e){}
+  let closed = false;
+  const finish = (save, move) => { if (closed) return; closed = true;
+    if (save && !sameVal(el.value, show(P.a[f.idx]))) setEdit(P, f, el.value);
+    const tr = td.closest('tr'), Q = POLES[i]; tr.outerHTML = rowHtml(Q); renderEditBar(); renderKpis();
+    const tb = document.querySelector('.tab[data-tab="fill"] .n'); if (tb) tb.textContent = `${POLES.filter(fillDone).length}/${POLES.length}`;
+    if (move){ const rows = [...document.querySelectorAll('.fillt tbody tr[data-frow]')], r = rows.findIndex(x=>+x.dataset.frow===i);
+      const tgt = move==='down' ? rows[r+1]?.querySelector(`[data-ec="${rows[r+1].dataset.frow}|${k}"]`) : document.querySelector(`[data-ec="${i}|${k+1}"]`);
+      if (tgt){ tgt.scrollIntoView({block:'nearest', inline:'nearest'}); openCell(tgt); } } };
+  el.addEventListener('keydown', e=>{ if (e.key==='Enter' && !(f.long && e.shiftKey)){ e.preventDefault(); finish(true,'down'); } else if (e.key==='Tab'){ e.preventDefault(); finish(true, e.shiftKey ? null : 'right'); } else if (e.key==='Escape'){ e.preventDefault(); e.stopPropagation(); closed = true; td.classList.remove('editing'); td.innerHTML = prev; } });
+  el.addEventListener('blur', ()=>setTimeout(()=>finish(true), 0));
+  if (f.opts) el.addEventListener('change', ()=>finish(true));
+}
+function bulkApply(){
+  const f = fieldsOf(DS)[+FILLBULK.k]; if (!f) return; const ps = POLES.filter(P=>FILLSEL.has(P.key)); if (!ps.length) return;
+  const v = document.querySelector('[data-bulkv]')?.value ?? FILLBULK.v;
+  if (ps.length>20 && !confirm(`Set ${f.label} to "${v||'(blank)'}" on ${ps.length} poles?`)) return;
+  ps.forEach(P=>setEdit(POLES.find(x=>x.key===P.key), f, v)); afterEdit(true); toast(`${f.label} set on ${ps.length} poles (unsaved)`);
+}
+function bulkOsmose(){
+  const fs = fieldsOf(DS).filter(f=>f.osm); let n = 0;
+  [...FILLSEL].forEach(key=>fs.forEach(f=>{ const P = POLES.find(x=>x.key===key); if (!P || P.a[f.idx]!=null) return; const o = f.osm(P); if (o!=null && o!==''){ setEdit(P, f, o); n++; } }));
+  afterEdit(true); toast(n ? `Filled ${n} blank cell${n===1?'':'s'} from Osmose (unsaved)` : 'No blank cells to fill on the selected poles');
+}
+
+/* ---------- saving edits into the workbook ---------- */
+let JSZIPP = null;
+function jszip(){ if (window.JSZip) return Promise.resolve(window.JSZip); if (!JSZIPP) JSZIPP = new Promise((res,rej)=>{ const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'; s.onload = ()=>res(window.JSZip); s.onerror = ()=>{ JSZIPP = null; rej(new Error('Could not load the zip library. Check your internet connection.')); }; document.head.appendChild(s); }); return JSZIPP; }
+const xmlEsc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const xmlUnesc = s => String(s).replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+const attrOf = (tag, name) => (new RegExp(`\\s${name.replace(':','\\:')}="([^"]*)"`).exec(tag) || [])[1];
+const colNum = ref => ref.match(/^[A-Z]+/)[0].split('').reduce((n,c)=>n*26+c.charCodeAt(0)-64, 0);
+function cellXml(ref, c, old){
+  const s = old ? attrOf(old.match(/^<c\b[^>]*>/)[0], 's') : null, sa = s!=null ? ` s="${s}"` : '';
+  if (c.formula){ const f = old && (old.match(/<f\b[^>]*\/>|<f\b[^>]*>[\s\S]*?<\/f>/) || [])[0]; if (!f) return old; return `<c r="${ref}"${sa} t="str">${f}<v>${xmlEsc(c.v ?? '')}</v></c>`; }
+  if (c.v==null || c.v==='') return `<c r="${ref}"${sa}/>`;
+  if (typeof c.v==='number') return `<c r="${ref}"${sa}><v>${c.v}</v></c>`;
+  return `<c r="${ref}"${sa} t="inlineStr"><is><t xml:space="preserve">${xmlEsc(c.v)}</t></is></c>`;
+}
+function setCellInRow(body, ref, c){
+  const re = new RegExp(`<c r="${ref}"(?=[\\s>/])[^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+  const m = re.exec(body); if (m) return body.slice(0, m.index) + cellXml(ref, c, m[0]) + body.slice(m.index + m[0].length);
+  if (c.formula) return body;
+  const want = colNum(ref), cre = /<c r="([A-Z]+)\d+"/g; let x;
+  while ((x = cre.exec(body))){ if (colNum(x[1]) > want) return body.slice(0, x.index) + cellXml(ref, c, null) + body.slice(x.index); }
+  return body + cellXml(ref, c, null);
+}
+// change only the given cells of one sheet inside the .xlsx; everything else in the file is kept byte for byte
+async function patchWorkbook(bytes, sheetName, cells){
+  const JSZip = await jszip(), zip = await JSZip.loadAsync(bytes);
+  const wbx = await zip.file('xl/workbook.xml').async('string');
+  const tag = (wbx.match(/<sheet\b[^>]*>/g) || []).find(t=>xmlUnesc(attrOf(t,'name')||'')===sheetName);
+  if (!tag) throw new Error(`Sheet "${sheetName}" was not found in the workbook`);
+  const rid = attrOf(tag, 'r:id'), rels = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+  const rel = (rels.match(/<Relationship\b[^>]*>/g) || []).find(t=>attrOf(t,'Id')===rid), target = attrOf(rel||'', 'Target');
+  if (!target) throw new Error('Could not find the sheet inside the workbook');
+  const path = target.startsWith('/') ? target.slice(1) : `xl/${target.replace(/^\.\//,'')}`;
+  let xml = await zip.file(path).async('string');
+  const byRow = new Map(); cells.forEach((c, ref)=>{ const r = +ref.match(/\d+$/)[0]; if (!byRow.has(r)) byRow.set(r, new Map()); byRow.get(r).set(ref, c); });
+  const done = new Set();
+  xml = xml.replace(/<row\b([^>]*?)(\/>|>([\s\S]*?)<\/row>)/g, (all, attrs, tail, inner) => {
+    const r = +((attrs.match(/\sr="(\d+)"/) || [])[1]); const want = byRow.get(r); if (!want) return all;
+    done.add(r); let body = inner || ''; want.forEach((c, ref)=>{ body = setCellInRow(body, ref, c); });
+    return `<row${attrs.replace(/\s*$/,'')}>${body}</row>`; });
+  for (const [r, want] of byRow){ if (done.has(r)) continue;
+    let body = ''; [...want.entries()].filter(([,c])=>!c.formula).sort((a,b)=>colNum(a[0])-colNum(b[0])).forEach(([ref,c])=>body += cellXml(ref, c, null));
+    if (!body) continue; const rowXml = `<row r="${r}">${body}</row>`;
+    const rre = /<row\b[^>]*\sr="(\d+)"/g; let x, at = -1; while ((x = rre.exec(xml))){ if (+x[1] > r){ at = x.index; break; } }
+    xml = at>=0 ? xml.slice(0, at) + rowXml + xml.slice(at) : xml.replace('</sheetData>', rowXml + '</sheetData>'); }
+  if (new DOMParser().parseFromString(xml, 'application/xml').querySelector('parsererror')) throw new Error('The edited sheet did not come out as valid XML; nothing was saved.');
+  zip.file(path, xml, {createFolders:false});   // don't add folder entries Excel never writes
+  if (/<calcPr\b/.test(wbx) && !/fullCalcOnLoad=/.test(wbx)) zip.file('xl/workbook.xml', wbx.replace(/<calcPr\b/, '<calcPr fullCalcOnLoad="1"'), {createFolders:false});   // Excel recalculates the formulas when opened
+  return zip.generateAsync({type:'uint8array', compression:'DEFLATE', compressionOptions:{level:6}});
+}
+async function fileByPath(dir, path){ const parts = path.split('/'); let d = dir; for (const p of parts.slice(0,-1)) d = await d.getDirectoryHandle(p); return d.getFileHandle(parts[parts.length-1]); }
+// cells to write for a circuit: every pending edit, plus the CNP Initial formula results on those rows
+function cellsFor(ds, cur, overwrite){
+  const ws = cur.Sheets[ds.sheetName], cells = new Map(), conflicts = [], written = [];
+  const ci = ds.hix.get(norm('CNP Initial Reccomendation')) ?? ds.hix.get(norm('CNP Initial Recommendation')), ti = ds.hix.get(norm('CNP Initial Reccomendation Type')) ?? ds.hix.get(norm('CNP Initial Recommendation Type'));
+  Object.entries(EDITS[ds.id] || {}).forEach(([key, E])=>{ const P = ds.poles.find(x=>x.key===key); if (!P) return;
+    const rows = P.dup?.same ? P.dup.rows : [P.row];
+    Object.entries(E).forEach(([h, e])=>{ const j = ds.hix.get(norm(h)); if (j==null) return; const col = XLSX.utils.encode_col(ds.c0 + j);
+      const now = ws?.[`${col}${rows[0]}`]?.v ?? null;
+      if (!sameVal(now, e.was) && !sameVal(now, e.v)){ conflicts.push({P, h, now, e}); if (!overwrite) return; }
+      rows.forEach(r=>cells.set(`${col}${r}`, {v: e.v})); written.push({key, h}); });
+    if (ds.calcInit) rows.forEach(r=>{ if (ci!=null) cells.set(`${XLSX.utils.encode_col(ds.c0+ci)}${r}`, {formula:true, v:P.cnpInit}); if (ti!=null) cells.set(`${XLSX.utils.encode_col(ds.c0+ti)}${r}`, {formula:true, v:P.cnpInitType}); }); });
+  return {cells, conflicts, written};
+}
+function openSave(){
+  const ds = DS, n = editTotal(ds); if (!n) return; const toFile = ds.src && FOLDER;
+  const rows = []; Object.entries(EDITS[ds.id] || {}).forEach(([key,E])=>{ const P = ds.poles.find(x=>x.key===key); Object.entries(E).forEach(([h,e])=>rows.push({P, key, h, e})); });
+  rows.sort((a,b)=>byPole(a.P||{}, b.P||{}));
+  $('#edBody').innerHTML = `<h2>${toFile ? 'Save to workbook' : 'Download updated workbook'}</h2>
+    <p class="muted" style="margin:0 0 10px">${toFile ? `Writes ${n} change${n===1?'':'s'} into <b>${esc(FOLDER.name)}/${esc(ds.src.path)}</b>. OneDrive then uploads it to SharePoint. Only the changed cells are touched; formatting, drop-downs and formulas stay as they are. Avoid saving while someone else is editing this workbook in Excel.`
+      : `Makes a copy of <b>${esc(ds.file)}</b> with your ${n} change${n===1?'':'s'} for you to upload to SharePoint. Only the changed cells are touched. Link the synced folder instead to save straight into the workbook.`}</p>
+    <div class="tscroll" style="max-height:44vh"><table><thead><tr><th>Pole</th><th>Field</th><th>Was</th><th>New</th></tr></thead><tbody>
+    ${rows.slice(0,400).map(r=>`<tr class="${r.e.conflict?'confrow':''}"><td><b>${esc(r.P?.id ?? r.key)}</b></td><td>${esc(niceLabel(r.h))}</td><td class="muted">${r.e.was==null?'blank':esc(show(r.e.was))}${r.e.conflict&&r.P?` <span class="badtxt">· file now: ${esc(show(r.P.orig[ds.hix.get(norm(r.h))])||'blank')}</span>`:''}</td><td><b>${r.e.v==null?'blank':esc(show(r.e.v))}</b></td></tr>`).join('')}
+    ${rows.length>400?`<tr><td colspan="4" class="muted">…and ${rows.length-400} more</td></tr>`:''}</tbody></table></div>
+    <label class="opt"><input type="checkbox" name="overwrite"><span><b>Overwrite cells someone else changed</b><small>If a cell changed in the workbook since you edited it, it's skipped (and kept here) unless this is ticked.</small></span></label>
+    <div class="dlgbtns"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="ok">${toFile ? 'Save to workbook' : 'Download'}</button></div>`;
+  $('#edDlg').showModal();
+}
+$('#edBody').addEventListener('submit', e=>{ if (e.submitter?.value!=='ok') return; saveWorkbook(DS, $('#edBody').elements.overwrite.checked); });
+async function saveWorkbook(ds, overwrite){
+  const toFile = ds.src && FOLDER, curId = DS?.id, curKey = DS && CUR!=null ? POLES[CUR]?.key : null;
+  try {
+    let fh = null, bytes;
+    if (toFile){
+      if (await permState(FOLDER.handle, true, 'readwrite')!=='granted'){ toast('Permission to save into the folder was not given'); return; }
+      fh = await fileByPath(FOLDER.handle, ds.src.path); bytes = await (await fh.getFile()).arrayBuffer();
+    } else bytes = ds.bytes;
+    toast('Saving…', 20000);
+    const cur = XLSX.read(new Uint8Array(bytes), {type:'array', sheets:[ds.sheetName]});
+    const {cells, conflicts, written} = cellsFor(ds, cur, overwrite);
+    if (!cells.size){ toast(conflicts.length ? `Nothing saved: all ${conflicts.length} changes conflict with newer values in the file` : 'Nothing to save'); return; }
+    const out = await patchWorkbook(bytes, ds.sheetName, cells);
+    // check the result reads back with the new values before it replaces anything
+    const chk = XLSX.read(out, {type:'array', sheets:[ds.sheetName]}).Sheets[ds.sheetName];
+    for (const [ref, c] of cells){ if (!c.formula && !sameVal(chk[ref]?.v ?? null, c.v)) throw new Error(`Cell ${ref} did not save correctly; nothing was written.`); }
+    if (fh){ const w = await fh.createWritable(); await w.write(out); await w.close(); }
+    else { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})); a.download = ds.file; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 60000); }
+    // drop the saved edits (conflicts that were skipped stay pending), then reload the circuit from what was written
+    written.forEach(({key, h})=>{ const E = EDITS[ds.id]?.[key]; if (E){ delete E[h]; if (!Object.keys(E).length) delete EDITS[ds.id][key]; } });
+    if (EDITS[ds.id] && !Object.keys(EDITS[ds.id]).length) delete EDITS[ds.id]; saveEditsLS();
+    const prev = DS, nds = readWorkbook(out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength), ds.file, ds.id); if (prev) useSet(prev);
+    if (toFile){ const nf = await fh.getFile(); nds.src = {path: ds.src.path, lm: nf.lastModified}; const fe = FOLDER.files.get(ds.src.path); FOLDER.files.set(ds.src.path, {...(fe||{}), lm: nf.lastModified, size: nf.size, id: nds.id, err: null}); }
+    else dbPut({id: nds.id, name: ds.file, bytes: nds.bytes, at: Date.now()});
+    const i = SETS.findIndex(x=>x===ds); if (i>=0) SETS[i] = nds; else SETS.push(nds);
+    refreshInPlace(curId, curKey);
+    const skipped = overwrite ? 0 : conflicts.length;
+    toast(`${toFile ? 'Saved' : 'Downloaded'} ${written.length} change${written.length===1?'':'s'}${skipped?`; ${skipped} skipped because the file changed (still pending)`:''}`, 6000);
+  } catch(e){ console.error(e); toast(/NoModification|InvalidState|NotReadable|lock/i.test(e.name+e.message) ? 'The workbook is locked (open in Excel?). Close it and try again.' : `Save failed: ${e.message}`, 8000); }
+}
+function refreshInPlace(curId, curKey){
+  const ds = SETS.find(x=>x.id===curId) || SETS[0]; if (!ds) return;
+  useSet(ds); if (ds.id!==curId){ CUR = null; FIL = NOFIL(); }
+  else if (curKey){ const P = POLES.find(x=>x.key===curKey); CUR = P ? P.i : null; }
+  const y = window.scrollY, sc = document.querySelector('.fillscroll'), st = sc && [sc.scrollTop, sc.scrollLeft];
+  renderHead(); renderKpis(); render(); window.scrollTo(0, y);
+  const sc2 = document.querySelector('.fillscroll'); if (sc2 && st){ sc2.scrollTop = st[0]; sc2.scrollLeft = st[1]; }
+}
+if (location.hostname==='localhost') Object.assign(window.__osmTest || (window.__osmTest = {}), { patchWorkbook, sets: () => SETS, edits: () => EDITS });
 
 let tt; function toast(t, ms){ const el = $('#toast'); el.textContent = t; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(()=>el.classList.remove('show'), ms || 2400); }
 })();

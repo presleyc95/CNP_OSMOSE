@@ -38,12 +38,14 @@
     <span class="spacer"></span><select class="btn" id="circSel" aria-label="Switch circuit" hidden></select><button class="btn" id="rmCirc" hidden>Remove circuit</button><button class="btn" id="xlsxBtn">Download review (Excel)…</button>
   </section>
   <section class="kpis" id="kpis"></section>
+  <section class="editbar" id="editBar" hidden></section>
   <section class="panel">
     <nav class="tabs" role="tablist" id="tabs"></nav>
     <div class="view" id="view"></div>
   </section>
   <p class="muted" style="font-size:12px;margin:14px 0 40px">Checks flag poles for review; they don't replace an engineer's judgment. Your review marks and notes are saved in this browser only, keyed by pole number.</p>
 </main>
+<dialog id="edDlg" class="dlg wide"><form method="dialog" id="edBody"></form></dialog>
 <dialog id="fdDlg" class="dlg"><div id="fdBody"></div></dialog>
 <dialog id="xlDlg" class="dlg"><form method="dialog" id="xlForm"></form></dialog>
 <div class="toast" id="toast" role="status"></div>
