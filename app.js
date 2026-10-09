@@ -924,6 +924,7 @@ function openPole(i){ CUR = +i; if (!filtered().some(P=>P.i===CUR)) FIL = NOFIL(
 document.addEventListener('click', e=>{
   const t = e.target.closest('button,[data-open],[data-kf],th[data-sort],[data-copytext],td[data-kf],i[data-kf],td[data-ec]'); if (!t) return;
   if (t.dataset.ec && !t.classList.contains('editing')){ openCell(t); return; }
+  if (t.dataset.fseg){ const [i,k] = t.dataset.fseg.split('|'); const P = POLES[+i], f = fieldsOf(DS)[+k]; setEdit(P, f, t.getAttribute('aria-pressed')==='true' ? '' : t.dataset.val); afterEdit(); return; }
   if (t.dataset.useosm){ const [i,k] = t.dataset.useosm.split('|'); const P = POLES[+i], f = fieldsOf(DS)[+k]; setEdit(P, f, f.osm(P)); afterEdit(); return; }
   if (t.dataset.undo){ const [i,k] = t.dataset.undo.split('|'); const P = POLES[+i], f = fieldsOf(DS)[+k]; setEdit(P, f, P.orig[f.idx]); afterEdit(); return; }
   if (t.dataset.saveed){ openSave(); return; }
@@ -1024,6 +1025,11 @@ const FIELDDEFS = [
   {g:'CNP review', h:['CNP Final Reccomendation Type','CNP Final Recommendation Type'], needs:['CNP Final Reccomendation','CNP Final Recommendation'], suggest:['Fiberglass','Ductile Iron'], short:'CNP final type'},
   {g:'CNP review', h:['CNP Notes'], long:true},
 ];
+const SUBS = [['Equipment', ['majorequipmenttype','majorequipmentstencil','majorscenariotype','equipmenttype','equipmentstencil']],
+  ['Pole condition', ['polecomposition','heightandclass','woodpeckerdamage','ovhissues']],
+  ['Site & access', ['treetrimmingneeded','isprimaryconductor600aac','truckaccess','validfeederpoleandcircuit','crossingtype','permittype','circuitsection']],
+  ['Designer recommendation', ['designerreccommendation','designerrecommendation','notes']]];
+const subOf = (h, g) => g==='CNP review' ? 'CNP review' : (SUBS.find(([,l])=>l.includes(norm(h))) || ['Other'])[0];
 const niceLabel = h => h.trim().replace(/Recc?omm?endation/gi,'Recommendation').replace(/^Is /,'').replace(/\?$/,'');
 // the editable columns present in a circuit's workbook
 function fieldsOf(ds){
@@ -1032,7 +1038,8 @@ function fieldsOf(ds){
   FIELDDEFS.forEach(d=>{ if (d.needs && !d.needs.some(n=>ds.hix.has(norm(n)))) return;
     const header = d.h.find(n=>ds.hix.has(norm(n))); if (!header) return; const idx = ds.hix.get(norm(header)); if (used.has(idx)) return; used.add(idx);
     const opts = d.list ? (ds.lookups?.[norm(d.list)]?.length ? ds.lookups[norm(d.list)] : LISTS[d.list] || []) : null;
-    out.push({...d, header: ds.head[idx], idx, label: niceLabel(ds.head[idx]), short: d.short || niceLabel(ds.head[idx]), opts}); });
+    out.push({...d, header: ds.head[idx], idx, label: niceLabel(ds.head[idx]), short: d.short || niceLabel(ds.head[idx]), opts, sub: subOf(ds.head[idx], d.g),
+      seg: !!opts && opts.length<=4 && opts.every(o=>o.length<=16) }); });
   return ds.fields = out;
 }
 const keyField = ds => fieldsOf(ds).find(f=>f.key);
@@ -1108,15 +1115,27 @@ function datalists(ds){
   return fieldsOf(ds).map((f,k)=>{ if (!f.suggest) return ''; const seen = new Set(Array.isArray(f.suggest) ? f.suggest : []); SETS.forEach(s=>s.poles.forEach(P=>{ const j = s.hix.get(norm(f.header)); if (j!=null && P.a[j]!=null) seen.add(show(P.a[j])); }));
     return `<datalist id="dl-${k}">${[...seen].sort(natural).map(x=>`<option value="${esc(x)}">`).join('')}</datalist>`; }).join('');
 }
+function segControl(P, f, k){
+  const cur = show(P.a[f.idx]);
+  return `<div class="fseg" role="group" aria-label="${esc(f.label)}">${f.opts.map(o=>{ const on = sameVal(o, cur), b = f.key || /recommendation/i.test(f.label) ? bucket(o) : '';
+    return `<button type="button" class="${on?`on ${b?BKC[b]:''}`:''}" aria-pressed="${on}" data-fseg="${P.i}|${k}" data-val="${esc(o)}" title="${on?'Click again to clear':''}">${esc(o)}</button>`; }).join('')}
+    ${cur && !f.opts.some(o=>sameVal(o,cur)) ? `<span class="pill none">${esc(cur)}</span>` : ''}</div>`;
+}
 function fillForm(P){
   const fs = fieldsOf(P.ds); if (!fs.length) return '';
-  const E = EDITS[P.ds.id]?.[P.key] || {}, groups = [...new Set(fs.map(f=>f.g))];
-  const filled = fs.filter(f=>P.a[f.idx]!=null).length;
-  return `<details class="fill sec" ${filled<fs.length || Object.keys(E).length ? 'open' : ''}><summary><b>Fill in</b> <span class="muted sm">${filled} of ${fs.length} filled${Object.keys(E).length?` · <span class="upd">${Object.keys(E).length} unsaved</span>`:''}</span></summary>
-    ${groups.map(g=>`<div class="fgroup"><div class="sm muted fgl">${g}</div><div class="fgrid">${fs.map((f,k)=>{ if (f.g!==g) return ''; const e = E[f.header], o = f.osm && f.osm(P);
-      return `<label class="ff ${f.long?'wide':''} ${e?'pend':''} ${e?.conflict?'conf':''}"><span class="fl">${esc(f.label)}${f.key?' <b class="req">*</b>':''}</span>${control(P, f, k, `data-fe="${P.i}|${k}"`)}
-        <span class="fh">${e ? `${e.conflict?`<b class="badtxt">Changed in the file since you edited it: now "${esc(show(P.orig[f.idx]))}"</b>. `:`Unsaved · was ${P.orig[f.idx]==null?'blank':`"${esc(show(P.orig[f.idx]))}"`}. `}<button type="button" class="link sm" data-undo="${P.i}|${k}">Undo</button>` : ''}${!e && o!=null && o!=='' && !sameVal(o, P.a[f.idx]) ? `<button type="button" class="link sm" data-useosm="${P.i}|${k}">Use Osmose: ${esc(o)}</button>` : ''}</span></label>`; }).join('')}</div></div>`).join('')}
-    ${P.ds.calcInit ? `<div class="sm muted" style="margin-top:6px">CNP initial recommendation (from the workbook's Sheet Rules): <b>${esc(P.cnpInit||'—')}</b>${P.cnpInitType?` · ${esc(P.cnpInitType)}`:''}</div>` : ''}
+  const E = EDITS[P.ds.id]?.[P.key] || {}, subs = [...new Set(fs.map(f=>f.sub))];
+  const filled = fs.filter(f=>P.a[f.idx]!=null).length, nE = Object.keys(E).length;
+  const field = (f) => { const k = fs.indexOf(f), e = E[f.header], o = f.osm && f.osm(P), was = P.orig[f.idx];
+    const useO = !e && o!=null && o!=='' && !sameVal(o, P.a[f.idx]) ? `<button type="button" class="osm" data-useosm="${P.i}|${k}" title="Fill with the Osmose value">Osmose: ${esc(o)}</button>` : '';
+    // button groups that won't fit one column get two, so their choices stay on one line
+    const span2 = f.seg && f.opts.reduce((n,o)=>n + o.length*8.5 + 36, 0) > 250;
+    return `<div class="ff ${f.long?'wide':''} ${span2?'span2':''} ${e?'pend':''} ${e?.conflict?'conf':''}">
+      <div class="flrow"><label class="fl" ${f.seg?'':`for="fe-${P.i}-${k}"`}>${esc(f.label)}${f.key?' <b class="req" title="Required">*</b>':''}</label>${useO}</div>
+      ${f.seg ? segControl(P, f, k) : control(P, f, k, `id="fe-${P.i}-${k}" data-fe="${P.i}|${k}"`)}
+      ${e ? `<div class="fh">${e.conflict ? `<b class="badtxt">Changed in the file since you edited it: now "${esc(show(was))}".</b>` : `Unsaved · was ${was==null?'blank':`"${esc(show(was))}"`}.`} <button type="button" class="link sm" data-undo="${P.i}|${k}">Undo</button></div>` : ''}</div>`; };
+  return `<details class="fill sec" ${filled<fs.length || nE ? 'open' : ''}><summary><b>Fill in</b> <span class="muted sm">${filled} of ${fs.length} filled${nE?` · <span class="upd">${nE} unsaved</span>`:''}</span></summary>
+    <div class="fcards">${subs.map(g=>`<section class="fcard ${g==='CNP review'?'cnp':''}"><h4>${esc(g)}</h4><div class="fgrid">${fs.filter(f=>f.sub===g).sort((x,y)=>(x.long?1:0)-(y.long?1:0)).map(field).join('')}</div>
+      ${g==='CNP review' && P.ds.calcInit ? `<div class="calcline">CNP initial recommendation from the workbook's Sheet Rules: ${P.cnpInit ? recPill(P.bInit, P.cnpInit) : '<span class="muted">none yet</span>'}${P.cnpInitType?` <span class="muted">· ${esc(P.cnpInitType)}</span>`:''}</div>` : ''}</section>`).join('')}</div>
     ${datalists(P.ds)}</details>`;
 }
 function renderEditBar(){
