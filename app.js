@@ -16,10 +16,12 @@ const GPS_MILES = 3;      // a pole this far from the middle of the circuit is f
 
 /* ---------- storage ---------- */
 let DBP = null;
-function db(){ if (DBP) return DBP; DBP = new Promise((res,rej)=>{ try{ const r=indexedDB.open('osmrev',1); r.onupgradeneeded=()=>r.result.createObjectStore('files',{keyPath:'id'}); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);}catch(e){rej(e);} }); return DBP; }
+function db(){ if (DBP) return DBP; DBP = new Promise((res,rej)=>{ try{ const r=indexedDB.open('osmrev',2); r.onupgradeneeded=()=>{ const d=r.result; if (!d.objectStoreNames.contains('files')) d.createObjectStore('files',{keyPath:'id'}); if (!d.objectStoreNames.contains('handles')) d.createObjectStore('handles'); }; r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);}catch(e){rej(e);} }); return DBP; }
 async function dbAll(){ try{ const d=await db(); return await new Promise((res)=>{ const q=d.transaction('files').objectStore('files').getAll(); q.onsuccess=()=>res(q.result||[]); q.onerror=()=>res([]); }); }catch(e){ return []; } }
 async function dbPut(rec){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('files','readwrite'); t.objectStore('files').put(rec); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
 async function dbDel(id){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('files','readwrite'); t.objectStore('files').delete(id); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
+async function hGet(){ try{ const d=await db(); return await new Promise((res)=>{ const q=d.transaction('handles').objectStore('handles').get('folder'); q.onsuccess=()=>res(q.result||null); q.onerror=()=>res(null); }); }catch(e){ return null; } }
+async function hPut(h){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('handles','readwrite'); h ? t.objectStore('handles').put(h,'folder') : t.objectStore('handles').delete('folder'); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
 async function dbClear(){ try{ const d=await db(); await new Promise((res)=>{ const t=d.transaction('files','readwrite'); t.objectStore('files').clear(); t.oncomplete=res; t.onerror=res; }); }catch(e){} }
 let REV = {}; try { REV = JSON.parse(localStorage.getItem('osmrev:review')||'{}'); } catch(e){}
 const saveRev = () => { try{ localStorage.setItem('osmrev:review', JSON.stringify(REV)); }catch(e){} };
@@ -456,7 +458,7 @@ function vPoles(){
   const P = POLES[CUR];
   const sevDot = P => P.iss.some(x=>x.sev==='bad') ? 'bad' : P.iss.some(x=>x.sev==='warn') ? 'warn' : 'ok';
   return `${filterBar()}<div class="md">
-    <div class="plist" id="plist">${list.length ? list.map(Q=>`<button class="pcard" data-pole="${Q.i}" aria-current="${Q.i===CUR}"><span class="dot ${sevDot(Q)}" title="${Q.iss.filter(x=>x.sev!=='info').length} findings"></span><b>${esc(Q.id)}${rev(Q).ok?' <span class="tick" title="Reviewed">✓</span>':''}</b>${recPill(Q.bFin, BKL[Q.bFin])}<span class="spec">${esc([Q.dup&&!Q.dup.same&&`Row ${Q.row}`, Q.hc, Q.sec&&`Sec ${Q.sec}`, Q.load!=null&&`${Q.load}%`].filter(Boolean).join(' · '))}</span></button>`).join('') : '<p class="muted">No poles match these filters.</p>'}</div>
+    <div class="plist" id="plist">${list.length ? list.map(Q=>`<button class="pcard" data-pole="${Q.i}" aria-current="${Q.i===CUR}"><span class="dot ${sevDot(Q)}" title="${Q.iss.filter(x=>x.sev!=='info').length} findings"></span><b>${esc(Q.id)}${rev(Q).ok?' <span class="tick" title="Reviewed">✓</span>':''}</b>${recPill(Q.bFin, BKL[Q.bFin])}<span class="spec">${Q.ds.changed?.has(Q.key)?'<b class="upd">Updated</b> · ':''}${esc([Q.dup&&!Q.dup.same&&`Row ${Q.row}`, Q.hc, Q.sec&&`Sec ${Q.sec}`, Q.load!=null&&`${Q.load}%`].filter(Boolean).join(' · '))}</span></button>`).join('') : '<p class="muted">No poles match these filters.</p>'}</div>
     <div class="detail">${P ? poleDetail(P, list) : ''}</div></div>`;
 }
 const kv = (rows) => `<table class="kvt">${rows.filter(r=>r && r[1]!=null && r[1]!=='').map(([k,v,cls])=>`<tr><th>${esc(k)}</th><td class="${cls||''}">${v}</td></tr>`).join('')}</table>`;
@@ -728,18 +730,151 @@ function start(ds, keepTab){
   renderHead(); renderKpis(); render();
 }
 function switchSet(id){ const s = SETS.find(x=>x.id===id); if (s && s!==DS) start(s, true); }
-async function clearAll(){ await dbClear(); SETS=[]; DS=null; POLES=[]; WL=[]; ISS=[]; if (MAPFULL) setMapFull(false); $('#app').hidden=true; $('#empty').hidden=false; $('#clearAll').hidden=true; $('#openOther').hidden=true; $('#restore').hidden=true; $('#fileList').innerHTML=''; }
+async function clearAll(){ await dbClear(); unlinkFolder(true); SETS=[]; DS=null; POLES=[]; WL=[]; ISS=[]; if (MAPFULL) setMapFull(false); $('#app').hidden=true; $('#empty').hidden=false; $('#clearAll').hidden=true; $('#openOther').hidden=true; $('#restore').hidden=true; $('#fileList').innerHTML=''; }
 $('#pick').onclick = () => $('#file').click();
 $('#openOther').onclick = () => $('#file').click();
 $('#file').onchange = e => { const fs = [...e.target.files]; e.target.value=''; loadFiles(fs); };
 $('#clearAll').onclick = () => { if (confirm(SETS.length>1 ? `Remove all ${SETS.length} circuits from this browser?` : 'Remove this circuit from this browser?')) clearAll(); };
 $('#circSel').onchange = e => switchSet(e.target.value);
 $('#rmCirc').onclick = () => { if (!DS || !confirm(`Remove circuit ${DS.id} from this browser? Your review marks stay saved.`)) return;
-  const id = DS.id; dbDel(id); SETS = SETS.filter(s=>s.id!==id); if (!SETS.length){ clearAll(); return; } start(SETS[0], true); toast(`Circuit ${id} removed`); };
+  const id = DS.id; dbDel(id); if (DS.src){ const ig = fdIgnore(); ig.add(DS.src.path); fdIgnoreSave(ig); }
+  SETS = SETS.filter(s=>s.id!==id); if (!SETS.length){ clearAll(); return; } start(SETS[0], true); toast(`Circuit ${id} removed`); };
 $('#restore').onclick = async () => { const recs = await dbAll(); let cur = null; try{ cur = localStorage.getItem('osmrev:cur'); }catch(e){}
   loadFiles(recs.map(r=>({name:r.name, saved:r.bytes, recId:r.id})), cur); };
 dbAll().then(recs=>{ if (!recs.length) return; $('#restore').hidden=false;
   $('#restore').textContent = recs.length===1 ? `Reopen ${recs[0].name.length>40?recs[0].name.slice(0,38)+'…':recs[0].name}` : `Reopen ${recs.length} saved circuits`; });
+/* ---------- linked folder (OneDrive-synced SharePoint library), checked on a timer ----------
+   Uses the browser's File System Access API (Chrome / Edge). The folder handle is kept in IndexedDB; the browser
+   may ask again for permission when the app is reopened. Each check compares every workbook's modified time and
+   size, and only re-reads the ones that changed. */
+let FOLDER = null, FDTIMER = null, LASTKEY = 0;
+const POLLS = [[30,'30 seconds'],[60,'1 minute'],[120,'2 minutes'],[300,'5 minutes'],[900,'15 minutes'],[0,'Off (check by hand)']];
+let POLL = 60; try { const x = localStorage.getItem('osmrev:poll'); if (x!=null) POLL = +x; } catch(e){}
+const fdIgnore = () => { try { return new Set(JSON.parse(localStorage.getItem('osmrev:fdignore')||'[]')); } catch(e){ return new Set(); } };
+const fdIgnoreSave = set => { try{ localStorage.setItem('osmrev:fdignore', JSON.stringify([...set])); }catch(e){} };
+const hhmm = d => d ? d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '';
+const canFolder = () => 'showDirectoryPicker' in window;
+async function permState(h, ask){ try { if (!h.queryPermission) return 'granted'; let p = await h.queryPermission({mode:'read'}); if (p!=='granted' && ask) p = await h.requestPermission({mode:'read'}); return p; } catch(e){ return 'denied'; } }
+async function scanDir(dir, prefix='', depth=0, out=[]){
+  for await (const [name, h] of dir.entries()){
+    if (h.kind==='directory'){ if (depth<3 && !name.startsWith('.')) await scanDir(h, `${prefix}${name}/`, depth+1, out); }
+    else if (/\.(xlsx|xlsm|xls)$/i.test(name) && !name.startsWith('~$')) out.push({path:`${prefix}${name}`, name, h});
+  }
+  return out;
+}
+async function linkFolder(){
+  if (!canFolder()){ toast('Linking a folder needs Chrome or Edge'); return; }
+  let h; try { h = await window.showDirectoryPicker({id:'osmose-sheets', mode:'read'}); } catch(e){ return; }
+  if (FOLDER && FOLDER.name!==h.name) fdIgnoreSave(new Set());
+  await hPut(h); await connectFolder(h);
+}
+async function connectFolder(h){
+  stopPolling(); FOLDER = {handle:h, name:h.name, files:new Map(), last:null, busy:false, need:false, errs:[]};
+  renderFolder(); await checkFolder(true); startPolling();
+}
+function unlinkFolder(silent){
+  stopPolling(); if (!FOLDER) return; const name = FOLDER.name; FOLDER = null; hPut(null); fdIgnoreSave(new Set());
+  SETS.forEach(s=>{ delete s.src; }); renderFolder(); if (!silent) toast(`Unlinked ${name}. Its circuits stay open until you reload.`);
+}
+function startPolling(){ stopPolling(); if (POLL>0) FDTIMER = setInterval(()=>checkFolder(false), POLL*1000); }
+function stopPolling(){ if (FDTIMER) clearInterval(FDTIMER); FDTIMER = null; }
+// don't redraw the page while someone is typing or has the download dialog open
+const uiBusy = () => $('#xlDlg').open || (/^(input|textarea|select)$/i.test(document.activeElement?.tagName||'') && Date.now()-LASTKEY < 15000);
+async function checkFolder(initial, manual){
+  if (!FOLDER || FOLDER.busy) return;
+  if (!initial && !manual && uiBusy()){ setTimeout(()=>checkFolder(false), 5000); return; }
+  FOLDER.busy = true; renderFolder();
+  try {
+    if (await permState(FOLDER.handle, manual) !== 'granted'){ FOLDER.need = true; return; }
+    FOLDER.need = false;
+    const found = await scanDir(FOLDER.handle), ig = fdIgnore(), seen = new Set(), changed = [];
+    FOLDER.errs = [];
+    for (const f of found){ seen.add(f.path); if (ig.has(f.path)) continue;
+      let file; try { file = await f.h.getFile(); } catch(e){ FOLDER.errs.push(`${f.path}: can't be read right now (open in Excel or still syncing?)`); continue; }
+      const prev = FOLDER.files.get(f.path);
+      if (!prev || prev.lm!==file.lastModified || prev.size!==file.size) changed.push({path:f.path, file}); }
+    const removed = [...FOLDER.files.keys()].filter(k=>!seen.has(k) || ig.has(k));
+    FOLDER.found = found.length;
+    if (changed.length || removed.length) await applyFolder(changed, removed, initial);
+    else if (manual) toast('No changes in the folder');
+    FOLDER.last = new Date();
+  } catch(e){ console.error(e); FOLDER.errs.push(e.message || 'Could not read the folder'); }
+  finally { if (FOLDER){ FOLDER.busy = false; renderFolder(); } }
+}
+// compare values, not formatting: a date and the same day stored as a plain Excel number count as equal
+const sigVal = v => v instanceof Date ? String(Math.round(((v.getTime() - v.getTimezoneOffset()*6e4)/864e5 + 25569)*1e3)/1e3) : typeof v==='number' ? String(Math.round(v*1e3)/1e3) : String(v ?? '');
+const poleSig = P => JSON.stringify(P.a.map(sigVal));
+async function applyFolder(changed, removed, initial){
+  // read every changed file first; parsing below is synchronous so the page never sees half-swapped data
+  changed.sort((a,b)=>a.file.lastModified-b.file.lastModified);   // newest wins when two files hold the same circuit
+  const got = [];
+  for (const c of changed){ try { got.push({...c, bytes: await c.file.arrayBuffer()}); } catch(e){ FOLDER.errs.push(`${c.path}: can't be read right now`); } }
+  const curId = DS?.id, curKey = DS && CUR!=null ? POLES[CUR]?.key : null, msgs = [];
+  for (const g of got){
+    const prevEntry = FOLDER.files.get(g.path);
+    try {
+      const ds = readWorkbook(g.bytes, g.file.name);
+      if (!ds.poles.length) throw new Error('no pole rows found');
+      const owner = [...FOLDER.files.entries()].find(([k,x])=>k!==g.path && x.id===ds.id && x.lm>g.file.lastModified);
+      FOLDER.files.set(g.path, {lm:g.file.lastModified, size:g.file.size, id:ds.id, name:g.file.name, shadow:!!owner});
+      if (owner) continue;   // an older copy of a circuit another (newer) file already provides
+      ds.src = {path:g.path, lm:g.file.lastModified}; ds.updatedAt = initial ? null : new Date();
+      const old = SETS.findIndex(x=>x.id===ds.id);
+      if (old>=0 && !initial){ const before = new Map(SETS[old].poles.map(P=>[P.key, poleSig(P)]));
+        const ch = new Set(ds.poles.filter(P=>before.has(P.key) && before.get(P.key)!==poleSig(P)).map(P=>P.key)), add = ds.poles.filter(P=>!before.has(P.key)).length;
+        const gone = [...before.keys()].filter(k=>!ds.poles.some(P=>P.key===k)).length;
+        ds.changed = new Set([...ch, ...ds.poles.filter(P=>!before.has(P.key)).map(P=>P.key)]);
+        msgs.push(ch.size||add||gone ? `${ds.id}: ${[ch.size&&`${ch.size} pole${ch.size===1?'':'s'} changed`, add&&`${add} added`, gone&&`${gone} removed`].filter(Boolean).join(', ')}` : `${ds.id}: re-read, no pole changes`);
+      } else if (!initial) msgs.push(`${ds.id}: added from the folder`);
+      if (old>=0) SETS[old] = ds; else SETS.push(ds);
+    } catch(e){ console.error(e);
+      // keep the old data and try again next check (a file can be mid-sync or open in Excel)
+      FOLDER.files.set(g.path, {lm:null, size:-1, id:prevEntry?.id, name:g.file.name, err:e.message});
+      FOLDER.errs.push(`${g.path}: ${e.message || 'could not read'} (will retry)`); }
+  }
+  for (const k of removed){ const e = FOLDER.files.get(k); FOLDER.files.delete(k);
+    if (e?.id && ![...FOLDER.files.values()].some(x=>x.id===e.id && !x.err)){ const i = SETS.findIndex(x=>x.id===e.id && x.src?.path===k); if (i>=0){ SETS.splice(i,1); msgs.push(`${e.id}: file removed from the folder`); } } }
+  SETS.sort((a,b)=>natural(a.id,b.id));
+  if (!SETS.length){ if (DS) useSet(DS); return; }
+  if ($('#app').hidden){ let pick = null; try{ pick = localStorage.getItem('osmrev:cur'); }catch(e){} start(SETS.find(x=>x.id===pick) || SETS[0]); return; }
+  // refresh in place: same circuit, tab, filters, selected pole, map view and scroll
+  const ds = SETS.find(x=>x.id===curId) || SETS[0];
+  useSet(ds); if (ds.id!==curId){ CUR = null; FIL = NOFIL(); }
+  else if (curKey){ const P = POLES.find(x=>x.key===curKey); CUR = P ? P.i : null; }
+  const y = window.scrollY; renderHead(); renderKpis(); render(); window.scrollTo(0, y);
+  if (msgs.length) toast(`Updated from ${FOLDER.name}: ${msgs.join(' · ')}`, 6000);
+}
+function renderFolder(){
+  const chip = $('#folderChip'), F = FOLDER;
+  $('#linkFolder').hidden = !canFolder(); $('#linkFolder2').hidden = !canFolder() || !!F;
+  if (!F){ chip.hidden = true; return; }
+  chip.hidden = false; chip.classList.toggle('warn', F.need || F.errs.length>0);
+  chip.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>${esc(F.name)} · ${F.need ? 'click to reconnect' : F.busy ? 'checking…' : F.errs.length ? `${F.errs.length} file${F.errs.length===1?'':'s'} not read` : F.last ? `checked ${hhmm(F.last)}` : 'linked'}`;
+  if ($('#fdDlg').open) fdDialog();
+}
+function fdDialog(){
+  const F = FOLDER, ig = fdIgnore(); if (!F) return;
+  const rows = [...F.files.entries()].sort((a,b)=>natural(a[0],b[0])).map(([k,x])=>`<tr><td>${esc(k)}</td><td>${x.err?'<span class="pill bad">Not read</span>':x.shadow?`<span class="pill none">Older copy of ${esc(x.id)}</span>`:`<b>${esc(x.id||'')}</b>`}</td><td>${x.lm?`${fmtDate(new Date(x.lm))} ${hhmm(new Date(x.lm))}`:''}</td></tr>`).join('');
+  $('#fdBody').innerHTML = `<h2>Linked folder</h2>
+    <p class="muted" style="margin:0 0 10px">${esc(F.name)} is checked for changed workbooks (including subfolders). Changed circuits reload in place. Keep the folder synced by OneDrive so it matches SharePoint.</p>
+    ${F.need?`<div class="iss warn" style="margin-bottom:10px"><b>The browser needs your permission to read this folder again.</b><div class="w">Click Check now to allow it.</div></div>`:''}
+    <div class="filters"><label class="sm">Check for changes every <select class="fin" data-fdpoll="1">${POLLS.map(([v,l])=>`<option value="${v}" ${POLL===v?'selected':''}>${l}</option>`).join('')}</select></label>
+      <button class="btn sm primary" data-fd="check">Check now</button><span class="muted sm">${F.last?`Last checked ${hhmm(F.last)}`:''}</span></div>
+    ${F.errs.length?`<div class="issues" style="margin-bottom:10px">${F.errs.map(e=>`<div class="iss warn" style="font-size:13px">${esc(e)}</div>`).join('')}</div>`:''}
+    <div class="tscroll" style="max-height:40vh"><table><thead><tr><th>File</th><th>Circuit</th><th>Modified</th></tr></thead><tbody>${rows || `<tr><td colspan="3" class="muted">${F.found===0?'No Excel workbooks found in this folder.':'Nothing read yet.'}</td></tr>`}</tbody></table></div>
+    ${ig.size?`<p class="sm" style="margin:10px 0 4px"><b>Hidden files</b> (removed with Remove circuit)</p>${[...ig].map(k=>`<div class="sm">${esc(k)} <button class="link" data-fdunhide="${esc(k)}">Show again</button></div>`).join('')}`:''}
+    <div class="dlgbtns" style="margin-top:14px"><button class="btn" data-fd="relink">Link a different folder</button><button class="btn" data-fd="unlink">Unlink</button><span class="spacer"></span><button class="btn primary" data-fd="close">Close</button></div>`;
+}
+$('#folderChip').onclick = () => { if (FOLDER?.need){ checkFolder(false, true); return; } fdDialog(); $('#fdDlg').showModal(); };
+$('#linkFolder').onclick = () => linkFolder();
+$('#linkFolder2').onclick = () => linkFolder();
+$('#reconnect').onclick = async () => { const h = await hGet(); if (!h) return; if (await permState(h, true)==='granted'){ $('#reconnect').hidden = true; connectFolder(h); } else toast('Permission to read the folder was not given'); };
+document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState==='visible' && FOLDER && POLL>0 && (!FOLDER.last || Date.now()-FOLDER.last > 15000)) checkFolder(false); });
+// on open: reconnect the saved folder if the browser still allows it, otherwise offer a one-click reconnect
+hGet().then(async h=>{ renderFolder(); if (!h) return;
+  if (await permState(h, false)==='granted') connectFolder(h);
+  else { $('#reconnect').hidden = false; $('#reconnect').textContent = `Reconnect folder ${h.name}`; } });
+if (location.hostname==='localhost') window.__osmTest = { connectFolder, checkFolder, folder: () => FOLDER };   // local testing only
 const drop = $('#drop');
 ['dragenter','dragover'].forEach(ev=>document.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave','drop'].forEach(ev=>document.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.remove('over'); }));
@@ -775,6 +910,8 @@ document.addEventListener('click', e=>{
     if (MAPFULL){ MAPFULL = false; document.body.classList.remove('mapfull-on'); }
     openPole(t.dataset.open); return; }
   if (t.dataset.circ){ switchSet(t.dataset.circ); return; }
+  if (t.dataset.fd){ const a = t.dataset.fd; if (a==='close') $('#fdDlg').close(); else if (a==='check') checkFolder(false, true); else if (a==='unlink'){ $('#fdDlg').close(); unlinkFolder(); } else if (a==='relink'){ $('#fdDlg').close(); linkFolder(); } return; }
+  if (t.dataset.fdunhide){ const ig = fdIgnore(); ig.delete(t.dataset.fdunhide); fdIgnoreSave(ig); FOLDER?.files.delete(t.dataset.fdunhide); checkFolder(false, true); return; }
   if (t.dataset.mapscope){ MAPSCOPE = t.dataset.mapscope; render(); return; }
   if (t.dataset.mapfull){ setMapFull(!MAPFULL); return; }
   if (t.dataset.mapfit){ MAPVIEW = null; render(); return; }
@@ -793,6 +930,7 @@ document.addEventListener('change', e=>{
   const t = e.target;
   if (t.dataset.f && t.dataset.f!=='q'){ FIL[t.dataset.f] = t.value; render(); return; }
   if (t.dataset.mapbysel){ MAPBY = t.value; render(); return; }
+  if (t.dataset.fdpoll){ POLL = +t.value; try{ localStorage.setItem('osmrev:poll', POLL); }catch(e){} startPolling(); toast(POLL ? `Checking every ${POLLS.find(x=>x[0]===POLL)[1]}` : 'Automatic checks off'); return; }
   if (t.dataset.icat){ IFIL.cat = t.value; render(); return; }
   if (t.dataset.rev!=null){ const P = POLES[+t.dataset.rev]; REV[P.key] = {...rev(P), ok: t.checked}; saveRev(); renderKpis(); const y = window.scrollY; render(); window.scrollTo(0,y); toast(t.checked ? `Pole ${P.id} marked reviewed` : `Pole ${P.id} unmarked`); return; }
   if (t.dataset.revnote!=null){ const P = POLES[+t.dataset.revnote]; REV[P.key] = {...rev(P), note: t.value.trim()}; saveRev(); toast('Note saved'); }
@@ -802,6 +940,7 @@ let qT; document.addEventListener('input', e=>{
   if (t.dataset.f==='q' || t.dataset.dq){ clearTimeout(qT); qT = setTimeout(()=>{ if (t.dataset.dq) DQ = t.value; else FIL.q = t.value; const pos = t.selectionStart; render(); const n = document.querySelector(t.dataset.dq?'[data-dq]':'[data-f="q"]'); if (n){ n.focus(); try{ n.setSelectionRange(pos,pos); }catch(err){} } }, 200); }
 });
 document.addEventListener('keydown', e=>{
+  LASTKEY = Date.now();
   if (e.key==='Enter' && e.target.dataset?.mapfind){ e.preventDefault(); mapFind(e.target.value); return; }
   if (e.key==='Escape' && MAPFULL && !$('#xlDlg').open){ setMapFull(false); return; }
   if (TAB!=='poles' || /input|select|textarea/i.test(document.activeElement?.tagName||'')) return;
@@ -813,5 +952,5 @@ const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = t
 document.addEventListener('mouseover', e=>{ const t = e.target.closest('[data-tip]'); if (!t){ tip.hidden = true; return; } tip.textContent = t.dataset.tip; tip.hidden = false; });
 document.addEventListener('mousemove', e=>{ if (tip.hidden) return; const w = tip.offsetWidth; tip.style.left = Math.min(window.innerWidth-w-8, e.clientX+14)+'px'; tip.style.top = (e.clientY+16)+'px'; });
 
-let tt; function toast(t){ const el = $('#toast'); el.textContent = t; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(()=>el.classList.remove('show'), 2400); }
+let tt; function toast(t, ms){ const el = $('#toast'); el.textContent = t; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(()=>el.classList.remove('show'), ms || 2400); }
 })();

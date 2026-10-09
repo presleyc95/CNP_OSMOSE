@@ -336,3 +336,10 @@ body.mapfull-on{overflow:hidden}
 .dlgbtns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .toast,.tip{z-index:1100}
+
+/* ---------- linked folder ---------- */
+.fchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--ok);background:var(--ok-soft);color:var(--ok);border-radius:14px;padding:4px 10px;font-size:13px;font-weight:600;white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis}
+.fchip.warn{border-color:var(--amber-bar);background:var(--amber-soft);color:var(--amber)}
+.fchip:hover{filter:brightness(1.05)}
+b.upd{color:var(--blue);font-weight:600}
+@media (max-width:700px){.fchip{max-width:150px}}

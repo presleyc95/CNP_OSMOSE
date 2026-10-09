@@ -9,6 +9,8 @@ Open `index.html` (or the GitHub Pages site) and drop one or more Osmose `.xlsx`
 - The pole data sheet (found by its `POLE_NO` header), including the TechServ designer and CNP recommendation columns.
 - Any other sheet with a `Pole ID` column (Resiliency Replaces, Resiliency Braces, AddlOVH), tied back to each pole.
 
+**Linked SharePoint folder (Chrome or Edge)**: sync the SharePoint library to your computer with OneDrive, then click **Link a synced SharePoint folder** and pick it. Every Excel workbook in the folder (and up to three levels of subfolders) is loaded as a circuit. The app checks the folder on a timer (every minute by default; 30 seconds to 15 minutes, or off) and when a workbook changes it reloads just that circuit in place, keeping your tab, selected pole and map view, and tells you how many poles changed (changed poles are marked *Updated* in the pole list). New workbooks are added and deleted ones removed. A file that can't be read (open in Excel, still syncing) keeps its last good data and is retried. Click the folder chip in the top bar to change the interval, check now, see the files, or unlink. When you reopen the app the folder reconnects automatically, or with one click if the browser asks for permission again.
+
 **Tabs**
 - **Overview**: CNP final recommendation, inspection status, recommendation by circuit section, conditions found, % load, age, height/class, treatment. Click any bar to list those poles.
 - **Map**: every pole with GPS, colored by CNP final, Osmose rec, designer rec, status, % load, findings or review state. Shows the selected circuit by default, or all uploaded circuits (with circuit labels). Full screen mode, find a pole by number, and fit-to-poles.
