@@ -61,7 +61,7 @@ function show(v){ if (v==null) return ''; if (v instanceof Date) return fmtDate(
 function hcNorm(s){ if (s==null) return ''; const m = String(s).toUpperCase().match(/(\d{2})\s*[-\/;:, ]\s*([A-Z]*\d*[A-Z]*)/); if (!m) return ''; let c = m[2]; if (/^UNK/.test(c)) c='UNK'; return `${m[1]}-${c}`; }
 const hcUnknown = s => !s || /UNK|FG/.test(s);
 
-function readWorkbook(bytes, name){
+function readWorkbook(bytes, name, fallbackId){
   const wb = XLSX.read(new Uint8Array(bytes), {type:'array', cellDates:true});
   const tabs = wb.SheetNames.map(n=>{ const ws = wb.Sheets[n], rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null, raw:true, blankrows:true});
     const r0 = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']).s.r : 0;   // sheet row of rows[0], zero-based
@@ -70,7 +70,7 @@ function readWorkbook(bytes, name){
   // the pole data sheet: the one with the most columns that has a pole number column
   const main = tabs.filter(t=>t.rows[t.hr].map(norm).some(x=>x==='poleno'||x==='polenumber')).sort((a,b)=>b.rows[b.hr].length-a.rows[a.hr].length)[0]
     || tabs.sort((a,b)=>b.rows[b.hr].length-a.rows[a.hr].length)[0];
-  if (!main) throw new Error('No sheet with a POLE_NO or Pole ID column was found in this workbook.');
+  if (!main){ const e = new Error('No sheet with a POLE_NO or Pole ID column was found in this workbook.'); e.notOsmose = true; throw e; }
   FILE = name; HEAD = main.rows[main.hr].map(h=>h==null?'':String(h).trim()); HIX = new Map();
   HEAD.forEach((h,i)=>{ const k=norm(h); if (k && !HIX.has(k)) HIX.set(k,i); });
   const dateCols = HEAD.map((h,i)=>/date|inserted|downloaded|uploaded|processed|invoiced|installed/i.test(h) ? i : -1).filter(i=>i>=0);
@@ -97,7 +97,7 @@ function readWorkbook(bytes, name){
   WL.forEach(w=>w.rows.forEach(r=>{ r.P = (byKey.get(r.pole)||[])[0]||null; if (r.P) r.P.wl.push({w, r}); }));
   runChecks();
   const circs = [...new Set(POLES.map(P=>P.circuit).filter(Boolean))].sort(natural);
-  const ds = { id: circs.join(', ') || name.replace(/\.[^.]+$/,''), file: name, head: HEAD, hix: HIX, poles: POLES, wl: WL, iss: ISS };
+  const ds = { id: circs.join(', ') || fallbackId || name.replace(/\.[^.]+$/,''), file: name, head: HEAD, hix: HIX, poles: POLES, wl: WL, iss: ISS };
   POLES.forEach(P=>P.ds = ds); ISS.forEach(x=>x.ds = ds);
   return ds;
 }
@@ -757,7 +757,7 @@ const canFolder = () => 'showDirectoryPicker' in window;
 async function permState(h, ask){ try { if (!h.queryPermission) return 'granted'; let p = await h.queryPermission({mode:'read'}); if (p!=='granted' && ask) p = await h.requestPermission({mode:'read'}); return p; } catch(e){ return 'denied'; } }
 async function scanDir(dir, prefix='', depth=0, out=[]){
   for await (const [name, h] of dir.entries()){
-    if (h.kind==='directory'){ if (depth<3 && !name.startsWith('.')) await scanDir(h, `${prefix}${name}/`, depth+1, out); }
+    if (h.kind==='directory'){ if (depth<3 && !name.startsWith('.') && !/^(_?archive|old|superseded|backup)/i.test(name)) await scanDir(h, `${prefix}${name}/`, depth+1, out); }
     else if (/\.(xlsx|xlsm|xls)$/i.test(name) && !name.startsWith('~$')) out.push({path:`${prefix}${name}`, name, h});
   }
   return out;
@@ -813,8 +813,9 @@ async function applyFolder(changed, removed, initial){
   for (const g of got){
     const prevEntry = FOLDER.files.get(g.path);
     try {
-      const ds = readWorkbook(g.bytes, g.file.name);
-      if (!ds.poles.length) throw new Error('no pole rows found');
+      // a workbook inside a circuit folder (e.g. "Osmose Data/AN11/...") falls back to that folder's name
+      const ds = readWorkbook(g.bytes, g.file.name, g.path.includes('/') ? g.path.split('/').slice(-2)[0] : '');
+      if (!ds.poles.length){ const e = new Error('no pole rows found'); e.notOsmose = true; throw e; }
       const owner = [...FOLDER.files.entries()].find(([k,x])=>k!==g.path && x.id===ds.id && x.lm>g.file.lastModified);
       FOLDER.files.set(g.path, {lm:g.file.lastModified, size:g.file.size, id:ds.id, name:g.file.name, shadow:!!owner});
       if (owner) continue;   // an older copy of a circuit another (newer) file already provides
@@ -829,6 +830,8 @@ async function applyFolder(changed, removed, initial){
       if (old>=0) SETS[old] = ds; else SETS.push(ds);
     } catch(e){ console.error(e);
       // keep the old data and try again next check (a file can be mid-sync or open in Excel)
+      // other Excel files kept beside the Osmose sheets: skip quietly until they change
+      if (e.notOsmose){ FOLDER.files.set(g.path, {lm:g.file.lastModified, size:g.file.size, name:g.file.name, skip:true}); continue; }
       FOLDER.files.set(g.path, {lm:null, size:-1, id:prevEntry?.id, name:g.file.name, err:e.message});
       FOLDER.errs.push(`${g.path}: ${e.message || 'could not read'} (will retry)`); }
   }
@@ -854,7 +857,7 @@ function renderFolder(){
 }
 function fdDialog(){
   const F = FOLDER, ig = fdIgnore(); if (!F) return;
-  const rows = [...F.files.entries()].sort((a,b)=>natural(a[0],b[0])).map(([k,x])=>`<tr><td>${esc(k)}</td><td>${x.err?'<span class="pill bad">Not read</span>':x.shadow?`<span class="pill none">Older copy of ${esc(x.id)}</span>`:`<b>${esc(x.id||'')}</b>`}</td><td>${x.lm?`${fmtDate(new Date(x.lm))} ${hhmm(new Date(x.lm))}`:''}</td></tr>`).join('');
+  const rows = [...F.files.entries()].sort((a,b)=>natural(a[0],b[0])).map(([k,x])=>`<tr><td>${esc(k)}</td><td>${x.err?'<span class="pill bad">Not read</span>':x.skip?'<span class="pill none">Not an Osmose sheet (skipped)</span>':x.shadow?`<span class="pill none">Older copy of ${esc(x.id)}</span>`:`<b>${esc(x.id||'')}</b>`}</td><td>${x.lm?`${fmtDate(new Date(x.lm))} ${hhmm(new Date(x.lm))}`:''}</td></tr>`).join('');
   $('#fdBody').innerHTML = `<h2>Linked folder</h2>
     <p class="muted" style="margin:0 0 10px">${esc(F.name)} is checked for changed workbooks (including subfolders). Changed circuits reload in place. Keep the folder synced by OneDrive so it matches SharePoint.</p>
     ${F.need?`<div class="iss warn" style="margin-bottom:10px"><b>The browser needs your permission to read this folder again.</b><div class="w">Click Check now to allow it.</div></div>`:''}
